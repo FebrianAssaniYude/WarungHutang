@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# PyInstaller hanya dibutuhkan saat MEMBUAT file .exe, bukan untuk
+# menjalankan aplikasi sehari-hari. Dipisah dari requirements.txt supaya
+# instalasi biasa (pip install -r requirements.txt) tetap ringan.
+pyinstaller>=6.0

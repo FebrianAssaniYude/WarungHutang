@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+data/warung.db
+data/backup/
+data/error.log
+build/
+dist/
+# Catatan: build.spec SENGAJA tidak di-ignore - ini konfigurasi PyInstaller
+# yang disusun manual (datas, hiddenimports), bukan file auto-generated.
