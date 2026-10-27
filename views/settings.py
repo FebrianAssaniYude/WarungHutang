@@ -1,24 +1,22 @@
-"""
-views/settings.py
-
-Halaman Pengaturan:
-- Nama Warung (dipakai sebagai header di laporan PDF)
-- Ganti Username
-- Ganti Password (wajib memasukkan password lama)
-- Backup Database
-- Restore Database (WAJIB konfirmasi - tindakan berisiko)
-- Informasi Aplikasi
-"""
-
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import customtkinter as ctk
 
+from components.cards import SectionCard
+from components.dialogs import ConfirmDialog, show_error, show_success
+from components.forms import ErrorText, FormField
+from components.page_header import PageHeader
 from models.settings import SettingsModel, DEFAULT_NAMA_WARUNG
 from models.user import UserModel
 from utils.backup import backup_database, restore_database
+from utils.theme import COLORS, LAYOUT, SPACING, button_style, get_font
 
 APP_VERSION = "1.0.0"
+
+SAVE_BUTTON_WIDTH = 96
+PASSWORD_BUTTON_WIDTH = 190
+ACTION_BUTTON_WIDTH = 170
+TEXT_WRAPLENGTH = 560
 
 
 class SettingsPage(ctk.CTkFrame):
@@ -39,12 +37,30 @@ class SettingsPage(ctk.CTkFrame):
         self.db_path_getter = db_path_getter
         self.on_username_changed = on_username_changed
 
-        ctk.CTkLabel(
-            self, text="Pengaturan", font=ctk.CTkFont(size=24, weight="bold")
-        ).pack(anchor="w", padx=32, pady=(28, 12))
+        self._build_ui()
 
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        self.scroll.pack(fill="both", expand=True, padx=32, pady=(0, 24))
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        page_padding = LAYOUT["page_padding"]
+
+        PageHeader(self, "Pengaturan").pack(
+            fill="x",
+            padx=page_padding,
+            pady=LAYOUT["header_pady"],
+        )
+
+        self.scroll = ctk.CTkScrollableFrame(
+            self,
+            fg_color="transparent",
+        )
+        self.scroll.pack(
+            fill="both",
+            expand=True,
+            padx=(page_padding, SPACING["lg"]),
+            pady=(0, page_padding),
+        )
 
         self._build_nama_warung_section()
         self._build_username_section()
@@ -53,10 +69,9 @@ class SettingsPage(ctk.CTkFrame):
         self._build_info_section()
 
     def _safe_get_nama_warung(self) -> str:
-        # Dipanggil saat konstruksi halaman (termasuk saat MainWindow
-        # membangun semua halaman sekaligus setelah login) - kegagalan di
-        # sini TIDAK BOLEH menjatuhkan seluruh main window, jadi jatuh ke
-        # nilai default jika database bermasalah.
+        # Dipanggil saat konstruksi halaman (MainWindow membangun semua
+        # halaman sekaligus setelah login). Kegagalan di sini tidak boleh
+        # menjatuhkan main window, jadi jatuh ke nilai default.
         try:
             return self.settings_model.get_nama_warung()
         except Exception:
@@ -71,19 +86,59 @@ class SettingsPage(ctk.CTkFrame):
         self.username_entry.insert(0, self.user.get("username", ""))
 
     # ------------------------------------------------------------------
-    # Helper kartu section
+    # Helper
     # ------------------------------------------------------------------
-    def _make_card(self, title: str):
-        card = ctk.CTkFrame(self.scroll, fg_color=("white", "gray17"))
-        card.pack(fill="x", pady=(0, 16))
-        ctk.CTkLabel(
-            card, text=title, font=ctk.CTkFont(size=15, weight="bold")
-        ).pack(anchor="w", padx=20, pady=(18, 12))
+    def _make_card(self, title: str) -> SectionCard:
+        card = SectionCard(self.scroll, title)
+        card.pack(fill="x", pady=(0, SPACING["lg"]))
         return card
 
+    def _build_save_row(self, card, label: str, initial: str, command):
+        """Satu field dengan tombol Simpan di sampingnya + teks error di bawah."""
+        row = ctk.CTkFrame(
+            card.body,
+            fg_color="transparent",
+            width=0,
+            height=0,
+        )
+        row.pack(fill="x")
+        row.grid_columnconfigure(0, weight=1)
+
+        field = FormField(row, label, initial=initial)
+        field.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, SPACING["sm"]),
+        )
+        field.entry.bind("<Return>", lambda _event: command())
+
+        ctk.CTkButton(
+            row,
+            text="Simpan",
+            width=SAVE_BUTTON_WIDTH,
+            command=command,
+            **button_style("primary"),
+        ).grid(row=0, column=1, sticky="s")
+
+        error = ErrorText(card.body)
+        error.pack(fill="x", pady=(SPACING["sm"], 0))
+
+        return field, error
+
     @staticmethod
-    def _show_status(label: ctk.CTkLabel, message: str, error: bool = False):
-        label.configure(text=message, text_color="#D64545" if error else "#2E7D32")
+    def _body_text(parent, text: str, **pack_options):
+        label = ctk.CTkLabel(
+            parent,
+            text=text,
+            font=get_font("small"),
+            text_color=COLORS["text_secondary"],
+            anchor="w",
+            justify="left",
+            wraplength=TEXT_WRAPLENGTH,
+        )
+        label.pack(fill="x", **pack_options)
+        return label
 
     # ------------------------------------------------------------------
     # Nama Warung
@@ -91,32 +146,31 @@ class SettingsPage(ctk.CTkFrame):
     def _build_nama_warung_section(self):
         card = self._make_card("Nama Warung")
 
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=20, pady=(0, 8))
-
-        self.nama_warung_entry = ctk.CTkEntry(row, height=36)
-        self.nama_warung_entry.insert(0, self._safe_get_nama_warung())
-        self.nama_warung_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-        ctk.CTkButton(row, text="Simpan", width=90, command=self._handle_save_nama_warung).pack(
-            side="left"
+        field, self.nama_warung_error = self._build_save_row(
+            card,
+            "Nama Warung",
+            self._safe_get_nama_warung(),
+            self._handle_save_nama_warung,
         )
-
-        self.nama_warung_status = ctk.CTkLabel(card, text="")
-        self.nama_warung_status.pack(anchor="w", padx=20, pady=(0, 16))
+        self.nama_warung_entry = field.entry
 
     def _handle_save_nama_warung(self):
+        self.nama_warung_error.clear()
+
         value = self.nama_warung_entry.get().strip()
+
         try:
             saved = self.settings_model.set_nama_warung(value)
         except Exception:
-            self._show_status(
-                self.nama_warung_status, "Terjadi kesalahan pada database. Coba lagi.", error=True
+            self.nama_warung_error.show(
+                "Terjadi kesalahan pada database. Coba lagi."
             )
             return
+
         self.nama_warung_entry.delete(0, "end")
         self.nama_warung_entry.insert(0, saved)
-        self._show_status(self.nama_warung_status, f"Nama warung disimpan: {saved}")
+
+        show_success(self, "Nama Warung", f"Nama warung disimpan: {saved}")
 
     # ------------------------------------------------------------------
     # Ganti Username
@@ -124,162 +178,276 @@ class SettingsPage(ctk.CTkFrame):
     def _build_username_section(self):
         card = self._make_card("Ganti Username")
 
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=20, pady=(0, 8))
-
-        self.username_entry = ctk.CTkEntry(row, height=36)
-        self.username_entry.insert(0, self.user.get("username", ""))
-        self.username_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-        ctk.CTkButton(row, text="Simpan", width=90, command=self._handle_change_username).pack(
-            side="left"
+        field, self.username_error = self._build_save_row(
+            card,
+            "Username",
+            self.user.get("username", ""),
+            self._handle_change_username,
         )
-
-        self.username_status = ctk.CTkLabel(card, text="")
-        self.username_status.pack(anchor="w", padx=20, pady=(0, 16))
+        self.username_entry = field.entry
 
     def _handle_change_username(self):
+        self.username_error.clear()
+
         new_username = self.username_entry.get().strip()
+
         try:
-            ok, message = self.user_model.change_username(self.user["id"], new_username)
+            ok, message = self.user_model.change_username(
+                self.user["id"],
+                new_username,
+            )
         except Exception:
-            self._show_status(
-                self.username_status, "Terjadi kesalahan pada database. Coba lagi.", error=True
+            self.username_error.show(
+                "Terjadi kesalahan pada database. Coba lagi."
             )
             return
 
         if not ok:
-            self._show_status(self.username_status, message, error=True)
+            self.username_error.show(message)
             return
 
         self.user["username"] = new_username
+
         if self.on_username_changed:
             self.on_username_changed(new_username)
-        self._show_status(self.username_status, message)
+
+        show_success(self, "Username", message)
 
     # ------------------------------------------------------------------
     # Ganti Password
     # ------------------------------------------------------------------
     def _build_password_section(self):
         card = self._make_card("Ganti Password")
+        body = card.body
 
-        ctk.CTkLabel(card, text="Password Lama", anchor="w").pack(fill="x", padx=20)
-        self.old_password_entry = ctk.CTkEntry(card, height=36, show="*")
-        self.old_password_entry.pack(fill="x", padx=20, pady=(2, 10))
+        self.old_password_field = FormField(body, "Password Lama")
+        self.old_password_field.pack(fill="x")
 
-        ctk.CTkLabel(card, text="Password Baru", anchor="w").pack(fill="x", padx=20)
-        self.new_password_entry = ctk.CTkEntry(card, height=36, show="*")
-        self.new_password_entry.pack(fill="x", padx=20, pady=(2, 10))
+        self.new_password_field = FormField(body, "Password Baru")
+        self.new_password_field.pack(fill="x", pady=(SPACING["md"], 0))
 
-        ctk.CTkLabel(card, text="Konfirmasi Password Baru", anchor="w").pack(fill="x", padx=20)
-        self.confirm_password_entry = ctk.CTkEntry(card, height=36, show="*")
-        self.confirm_password_entry.pack(fill="x", padx=20, pady=(2, 10))
+        self.confirm_password_field = FormField(
+            body,
+            "Konfirmasi Password Baru",
+        )
+        self.confirm_password_field.pack(fill="x", pady=(SPACING["md"], 0))
 
-        ctk.CTkButton(card, text="Simpan Password Baru", command=self._handle_change_password).pack(
-            fill="x", padx=20, pady=(0, 8)
+        self.old_password_entry = self.old_password_field.entry
+        self.new_password_entry = self.new_password_field.entry
+        self.confirm_password_entry = self.confirm_password_field.entry
+
+        for entry in (
+            self.old_password_entry,
+            self.new_password_entry,
+            self.confirm_password_entry,
+        ):
+            entry.configure(show="*")
+
+        self.confirm_password_entry.bind(
+            "<Return>",
+            lambda _event: self._handle_change_password(),
         )
 
-        self.password_status = ctk.CTkLabel(card, text="")
-        self.password_status.pack(anchor="w", padx=20, pady=(0, 16))
+        self.password_error = ErrorText(body)
+        self.password_error.pack(fill="x", pady=(SPACING["sm"], 0))
+
+        footer = ctk.CTkFrame(
+            body,
+            fg_color="transparent",
+            width=0,
+            height=0,
+        )
+        footer.pack(fill="x", pady=(SPACING["md"], 0))
+
+        ctk.CTkButton(
+            footer,
+            text="Simpan Password Baru",
+            width=PASSWORD_BUTTON_WIDTH,
+            command=self._handle_change_password,
+            **button_style("primary"),
+        ).pack(side="right")
 
     def _handle_change_password(self):
+        self.password_error.clear()
+
         old = self.old_password_entry.get()
         new = self.new_password_entry.get()
         confirm = self.confirm_password_entry.get()
 
         if new != confirm:
-            self._show_status(self.password_status, "Konfirmasi password baru tidak cocok.", error=True)
+            self.password_error.show(
+                "Konfirmasi password baru tidak cocok."
+            )
             return
 
         try:
-            ok, message = self.user_model.change_password(self.user["id"], old, new)
+            ok, message = self.user_model.change_password(
+                self.user["id"],
+                old,
+                new,
+            )
         except Exception:
-            self._show_status(
-                self.password_status, "Terjadi kesalahan pada database. Coba lagi.", error=True
+            self.password_error.show(
+                "Terjadi kesalahan pada database. Coba lagi."
             )
             return
 
         if not ok:
-            self._show_status(self.password_status, message, error=True)
+            self.password_error.show(message)
             return
 
         self.old_password_entry.delete(0, "end")
         self.new_password_entry.delete(0, "end")
         self.confirm_password_entry.delete(0, "end")
-        self._show_status(self.password_status, message)
+
+        show_success(self, "Password", message)
 
     # ------------------------------------------------------------------
     # Backup & Restore
     # ------------------------------------------------------------------
     def _build_backup_section(self):
         card = self._make_card("Backup & Restore Database")
+        body = card.body
 
+        # --- Backup (aman) -------------------------------------------
         ctk.CTkLabel(
-            card,
-            text="Backup menyimpan salinan database dengan nama bertanggal. "
-                 "Restore akan MENGGANTI seluruh data saat ini dengan isi file backup yang dipilih.",
-            anchor="w", justify="left", wraplength=500, text_color="gray50", font=ctk.CTkFont(size=12),
-        ).pack(fill="x", padx=20, pady=(0, 12))
+            body,
+            text="Backup",
+            font=get_font("subheading"),
+            text_color=COLORS["text"],
+            anchor="w",
+        ).pack(fill="x")
 
-        btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        btn_row.pack(fill="x", padx=20, pady=(0, 8))
-
-        ctk.CTkButton(btn_row, text="Backup Database", command=self._handle_backup).pack(
-            side="left", padx=(0, 8)
+        self._body_text(
+            body,
+            "Backup menyimpan salinan database dengan nama bertanggal.",
+            pady=(SPACING["xs"], SPACING["md"]),
         )
-        ctk.CTkButton(
-            btn_row, text="Restore Database", fg_color="#D64545", hover_color="#B93A3A",
-            command=self._handle_restore,
-        ).pack(side="left")
 
-        self.backup_status = ctk.CTkLabel(card, text="")
-        self.backup_status.pack(anchor="w", padx=20, pady=(0, 16))
+        ctk.CTkButton(
+            body,
+            text="Backup Database",
+            width=ACTION_BUTTON_WIDTH,
+            command=self._handle_backup,
+            **button_style("primary"),
+        ).pack(anchor="w")
+
+        # --- Pemisah -------------------------------------------------
+        ctk.CTkFrame(
+            body,
+            height=1,
+            corner_radius=0,
+            fg_color=COLORS["border"],
+        ).pack(fill="x", pady=SPACING["lg"])
+
+        # --- Restore (destruktif) ------------------------------------
+        ctk.CTkLabel(
+            body,
+            text="Restore",
+            font=get_font("subheading"),
+            text_color=COLORS["text"],
+            anchor="w",
+        ).pack(fill="x")
+
+        self._body_text(
+            body,
+            "Restore akan mengganti seluruh data saat ini dengan isi file "
+            "backup yang dipilih. Tindakan ini tidak dapat dibatalkan.",
+            pady=(SPACING["xs"], SPACING["md"]),
+        )
+
+        ctk.CTkButton(
+            body,
+            text="Restore Database",
+            width=ACTION_BUTTON_WIDTH,
+            command=self._handle_restore,
+            **button_style("danger"),
+        ).pack(anchor="w")
 
     def _handle_backup(self):
         try:
             backup_path = backup_database(self.db_path_getter())
         except Exception:
-            messagebox.showerror(
-                "Backup Gagal", "Terjadi kesalahan saat membuat backup. Coba lagi."
+            show_error(
+                self,
+                "Backup Gagal",
+                "Terjadi kesalahan saat membuat backup. Coba lagi.",
             )
             return
 
-        self._show_status(self.backup_status, f"Backup berhasil: {backup_path}")
-        messagebox.showinfo("Backup Berhasil", f"Database berhasil dibackup ke:\n{backup_path}")
+        show_success(
+            self,
+            "Backup Berhasil",
+            f"Database berhasil dibackup ke:\n{backup_path}",
+        )
 
     def _handle_restore(self):
         chosen_path = filedialog.askopenfilename(
             title="Pilih File Backup",
             filetypes=[("Database SQLite", "*.db")],
         )
+
         if not chosen_path:
             return  # dibatalkan
 
-        confirmed = messagebox.askyesno(
-            "Konfirmasi Restore",
-            "PERHATIAN: Restore akan MENGGANTI seluruh data saat ini dengan isi "
-            "file backup yang dipilih.\n\n"
-            "Data saat ini akan otomatis diamankan terlebih dahulu, tapi sebaiknya "
-            "lanjutkan hanya jika Anda yakin.\n\nLanjutkan restore?",
-            icon="warning",
+        ConfirmDialog(
+            self,
+            title="Konfirmasi Restore",
+            message=(
+                "Restore akan mengganti seluruh data saat ini dengan "
+                "isi file backup yang dipilih.\n\n"
+                "Data saat ini akan diamankan otomatis terlebih dahulu, "
+                "tetapi lanjutkan hanya jika Anda yakin.\n\n"
+                "Lanjutkan restore?"
+            ),
+            on_confirm=lambda: self._do_restore(chosen_path),
+            confirm_text="Restore",
         )
-        if not confirmed:
-            return
 
+    def _do_restore(self, chosen_path: str):
         try:
-            safety_path = restore_database(chosen_path, self.db_path_getter())
+            safety_path = restore_database(
+                chosen_path,
+                self.db_path_getter(),
+            )
         except Exception:
-            messagebox.showerror(
-                "Restore Gagal", "Terjadi kesalahan saat melakukan restore. Coba lagi."
+            show_error(
+                self,
+                "Restore Gagal",
+                "Terjadi kesalahan saat melakukan restore. Coba lagi.",
             )
             return
 
-        self._show_status(self.backup_status, "Restore berhasil.")
-        note = f"\n\n(Data sebelumnya diamankan ke:\n{safety_path})" if safety_path else ""
-        messagebox.showinfo(
+        # Backup lama bisa berstruktur lebih tua dari aplikasi ini. Naikkan ke
+        # versi terbaru sekarang, agar halaman tidak error sampai aplikasi
+        # dibuka ulang.
+        try:
+            self.settings_model.db.initialize()
+        except Exception as exc:
+            show_error(
+                self,
+                "Restore Perlu Perhatian",
+                "Database berhasil dipulihkan, tetapi gagal diperbarui "
+                "ke versi terbaru.\n\n"
+                "Tutup lalu buka kembali aplikasi. Jika masih gagal, "
+                "kirim pesan ini ke pengembang.\n\n"
+                f"Detail: {exc}",
+            )
+            return
+
+        note = (
+            f"\n\nData sebelumnya diamankan ke:\n{safety_path}"
+            if safety_path
+            else ""
+        )
+
+        show_success(
+            self,
             "Restore Berhasil",
-            "Database berhasil dipulihkan dari file backup." + note +
-            "\n\nDisarankan logout lalu login kembali untuk memastikan tampilan sinkron.",
+            "Database berhasil dipulihkan dari file backup."
+            + note
+            + "\n\nDisarankan logout lalu login kembali agar "
+            "tampilan sinkron.",
         )
 
     # ------------------------------------------------------------------
@@ -288,14 +456,22 @@ class SettingsPage(ctk.CTkFrame):
     def _build_info_section(self):
         card = self._make_card("Informasi Aplikasi")
 
-        info_lines = [
-            f"Warung Hutang v{APP_VERSION}",
-            "Aplikasi pencatatan hutang warung - 100% offline, database lokal (SQLite).",
-            "Dibangun dengan Python, CustomTkinter, dan SQLite.",
-        ]
-        for line in info_lines:
-            ctk.CTkLabel(card, text=line, anchor="w", text_color="gray50", font=ctk.CTkFont(size=12)).pack(
-                fill="x", padx=20, pady=(0, 4)
-            )
+        ctk.CTkLabel(
+            card.body,
+            text=f"Warung Hutang v{APP_VERSION}",
+            font=get_font("body"),
+            text_color=COLORS["text"],
+            anchor="w",
+        ).pack(fill="x")
 
-        ctk.CTkLabel(card, text="", height=8).pack()  # spacer bawah
+        self._body_text(
+            card.body,
+            "Aplikasi pencatatan hutang warung - 100% offline, "
+            "database lokal (SQLite).",
+            pady=(SPACING["xs"], 0),
+        )
+        self._body_text(
+            card.body,
+            "Dibangun dengan Python, CustomTkinter, dan SQLite.",
+            pady=(SPACING["xs"], 0),
+        )

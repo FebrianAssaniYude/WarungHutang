@@ -1,29 +1,56 @@
-"""
-views/debts.py
-
-Halaman Transaksi Hutang - fitur TERPENTING aplikasi ini. Alur:
-    1. Pilih pelanggan
-    2. Scan barcode ATAU cari nama barang (satu kolom input yang sama)
-    3. Barang masuk ke keranjang (tabel)
-    4. Atur quantity dengan tombol +/-
-    5. Tambahkan barang lain (ulangi langkah 2), atau "+ Barang Manual"
-       untuk barang yang tidak ada di database
-    6. Simpan hutang
-
-Setelah scan berhasil, fokus kembali otomatis ke kolom scan/cari supaya
-alur "Scan -> Scan -> Scan -> Scan -> Simpan" bisa dilakukan tanpa mouse.
-"""
-
 import uuid
 
 import customtkinter as ctk
 
+from components.cards import SectionCard
+from components.customer_picker import CustomerPickerDialog, CustomerSelector
+from components.dialogs import (
+    show_error,
+    show_success,
+    show_warning,
+)
+from components.forms import FormField, SearchBar
+from components.page_header import PageHeader
+from components.tables import SimpleTable, text_cell
 from models.customer import CustomerModel
 from models.debt import DebtModel
 from models.product import ProductModel
 from utils.formatter import format_rupiah
+from utils.printer import Printer, PrinterError
+from utils.theme import (
+    COLORS,
+    LAYOUT,
+    RADIUS,
+    SPACING,
+    button_style,
+    get_font,
+)
 
-MAX_SEARCH_RESULTS = 6
+
+MAX_SEARCH_RESULTS = 8
+
+# Popup hasil pencarian barang (dua baris: nama + info).
+SEARCH_ROW_HEIGHT = 58
+SEARCH_POPUP_MIN_WIDTH = 460
+SEARCH_POPUP_MAX_HEIGHT = MAX_SEARCH_RESULTS * SEARCH_ROW_HEIGHT + 8
+
+CART_COLUMNS = [
+    {"title": "Barang", "weight": 5, "align": "left"},
+    {"title": "Harga", "weight": 3, "align": "right"},
+    {"title": "Qty", "weight": 3, "align": "center"},
+    {"title": "Subtotal", "weight": 3, "align": "right"},
+    {"title": "Aksi", "weight": 2, "align": "center"},
+]
+
+def _checkbox_kwargs() -> dict:
+    return {
+        "font": get_font("body"),
+        "text_color": COLORS["text"],
+        "fg_color": COLORS["primary"],
+        "hover_color": COLORS["primary_hover"],
+        "border_color": COLORS["border"],
+        "corner_radius": RADIUS["small"],
+    }
 
 
 class TransaksiHutangPage(ctk.CTkFrame):
@@ -34,660 +61,965 @@ class TransaksiHutangPage(ctk.CTkFrame):
         product_model: ProductModel,
         debt_model: DebtModel,
     ):
-        super().__init__(master, fg_color="transparent")
+        super().__init__(
+            master,
+            fg_color="transparent",
+        )
 
         self.customer_model = customer_model
         self.product_model = product_model
         self.debt_model = debt_model
 
         self.selected_customer = None
-        self.cart = []  # list of dict: row_id, product_id, product_name, quantity, price
+        self.cart = []
+
         self._current_results = []
+        self._selected_result_index = -1
+        self._search_popup = None
+        self._search_after_id = None
 
-        self._build_header()
-        self._build_customer_row()
-        self._build_search_row()
-        self._build_cart_area()
-        self._build_footer()
+        self.search_var = ctk.StringVar()
 
+        self._build_ui()
+
+        self._set_customer_button(None)
         self._render_cart()
 
     def refresh(self):
-        # Dipanggil setiap kali halaman ini dibuka dari sidebar. Sengaja
-        # TIDAK mengosongkan keranjang yang sedang diisi (page ini tidak
-        # dibuat ulang, hanya diangkat ke depan - jadi state tetap aman
-        # kalau pengguna sempat melihat halaman lain di tengah transaksi).
+        # Jangan mengosongkan transaksi yang sedang dibuat.
         pass
 
-    # ------------------------------------------------------------------
-    # Header
-    # ------------------------------------------------------------------
-    def _build_header(self):
-        ctk.CTkLabel(
-            self, text="Transaksi Hutang", font=ctk.CTkFont(size=24, weight="bold")
-        ).pack(anchor="w", padx=32, pady=(28, 4))
+    # ==================================================================
+    # UI
+    # ==================================================================
 
-        self.status_label = ctk.CTkLabel(self, text="", text_color="#2E7D32")
-        self.status_label.pack(anchor="w", padx=32)
+    def _build_ui(self):
+        page_padding = LAYOUT["page_padding"]
 
-    # ------------------------------------------------------------------
-    # Baris pilih pelanggan
-    # ------------------------------------------------------------------
-    def _build_customer_row(self):
-        row = ctk.CTkFrame(self, fg_color=("gray95", "gray20"))
-        row.pack(fill="x", padx=32, pady=(12, 12))
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
 
-        ctk.CTkLabel(row, text="Pelanggan:", font=ctk.CTkFont(size=13, weight="bold")).pack(
-            side="left", padx=(16, 8), pady=12
+        PageHeader(self, "Transaksi Hutang").grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=page_padding,
+            pady=LAYOUT["header_pady"],
         )
 
-        self.customer_button = ctk.CTkButton(
-            row, text="[ Cari/Pilih Pelanggan ]", anchor="w",
-            fg_color="transparent", border_width=1,
-            text_color=("gray10", "gray90"),
+        self._build_input_card(page_padding)
+        self._build_cart_card(page_padding)
+        self._build_bottom_card(page_padding)
+
+    # ------------------------------------------------------------------
+    # Kartu input: pelanggan + cari barang
+    # ------------------------------------------------------------------
+    def _build_input_card(self, page_padding):
+        card = SectionCard(self)
+        card.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=page_padding,
+            pady=(0, SPACING["md"]),
+        )
+
+        body = card.body
+        body.grid_columnconfigure(1, weight=1)
+
+        label_padx = (0, SPACING["lg"])
+
+        ctk.CTkLabel(
+            body,
+            text="Pelanggan",
+            font=get_font("button_small"),
+            text_color=COLORS["text"],
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=label_padx)
+
+        self.customer_button = CustomerSelector(
+            body,
             command=self._open_customer_picker,
         )
-        self.customer_button.pack(side="left", fill="x", expand=True, padx=(0, 16), pady=12)
+        self.customer_button.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+        )
+
+        ctk.CTkLabel(
+            body,
+            text="Tambah Barang",
+            font=get_font("button_small"),
+            text_color=COLORS["text"],
+            anchor="w",
+        ).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            padx=label_padx,
+            pady=(SPACING["md"], 0),
+        )
+
+        self.search_entry = SearchBar(
+            body,
+            self.search_var,
+            "Scan barcode atau cari nama barang...",
+        )
+        self.search_entry.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            pady=(SPACING["md"], 0),
+        )
+
+        self.search_entry.bind("<KeyRelease>", self._on_search_change)
+        self.search_entry.bind("<Return>", self._on_search_enter)
+        self.search_entry.bind("<Escape>", self._on_search_escape)
+        self.search_entry.bind("<Down>", self._on_search_down)
+        self.search_entry.bind("<Up>", self._on_search_up)
+
+    # ------------------------------------------------------------------
+    # Kartu keranjang
+    # ------------------------------------------------------------------
+    def _build_cart_card(self, page_padding):
+        card = SectionCard(self)
+        card.grid(
+            row=2,
+            column=0,
+            sticky="nsew",
+            padx=page_padding,
+            pady=(0, SPACING["md"]),
+        )
+
+        title_row = ctk.CTkFrame(
+            card.body,
+            fg_color="transparent",
+        )
+        title_row.pack(fill="x", pady=(0, SPACING["md"]))
+
+        ctk.CTkLabel(
+            title_row,
+            text="Daftar Barang",
+            font=get_font("subheading"),
+            text_color=COLORS["text"],
+        ).pack(side="left")
+
+        self.cart_count_label = ctk.CTkLabel(
+            title_row,
+            text="0 barang",
+            font=get_font("small"),
+            text_color=COLORS["text_secondary"],
+        )
+        self.cart_count_label.pack(side="left", padx=(SPACING["sm"], 0))
+
+        self.cart_table = SimpleTable(
+            card.body,
+            CART_COLUMNS,
+            empty_title="Belum ada barang",
+            empty_text="Scan barcode atau cari barang untuk menambahkannya.",
+            scrollable=True,
+        )
+        self.cart_table.pack(fill="both", expand=True)
+
+    # ------------------------------------------------------------------
+    # Kartu bawah: catatan + total + aksi
+    # ------------------------------------------------------------------
+    def _build_bottom_card(self, page_padding):
+        card = SectionCard(self)
+        card.grid(
+            row=3,
+            column=0,
+            sticky="ew",
+            padx=page_padding,
+            pady=(0, page_padding),
+        )
+
+        self.notes_field = FormField(
+            card.body,
+            "Catatan",
+            "Contoh: Bayar akhir bulan",
+        )
+        self.notes_field.pack(fill="x")
+        self.notes_entry = self.notes_field.entry
+
+        footer = ctk.CTkFrame(
+            card.body,
+            fg_color="transparent",
+        )
+        footer.pack(fill="x", pady=(SPACING["lg"], 0))
+        footer.grid_columnconfigure(0, weight=1)
+
+        total_frame = ctk.CTkFrame(footer, fg_color="transparent")
+        total_frame.grid(row=0, column=0, sticky="w")
+
+        ctk.CTkLabel(
+            total_frame,
+            text="Total Transaksi",
+            font=get_font("small"),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w")
+
+        self.total_label = ctk.CTkLabel(
+            total_frame,
+            text=format_rupiah(0),
+            font=get_font("title"),
+            text_color=COLORS["text"],
+        )
+        self.total_label.pack(anchor="w", pady=(SPACING["xs"], 0))
+
+        self.print_var = ctk.BooleanVar(value=False)
+
+        ctk.CTkCheckBox(
+            footer,
+            text="Cetak nota setelah transaksi",
+            variable=self.print_var,
+            **_checkbox_kwargs(),
+        ).grid(row=0, column=1, padx=(SPACING["xl"], SPACING["lg"]))
+
+        ctk.CTkButton(
+            footer,
+            text="Bersihkan",
+            width=110,
+            command=self._clear_transaction,
+            **button_style("secondary"),
+        ).grid(row=0, column=2, padx=(0, SPACING["sm"]))
+
+        ctk.CTkButton(
+            footer,
+            text="Proses",
+            width=150,
+            command=self._handle_save,
+            **button_style("primary"),
+        ).grid(row=0, column=3)
+
+    # ==================================================================
+    # PELANGGAN
+    # ==================================================================
+
+    def _set_customer_button(self, customer):
+        self.customer_button.set_customer(customer)
 
     def _open_customer_picker(self):
+        self._hide_search_popup()
+
         CustomerPickerDialog(
-            self, self.customer_model, on_select=self._handle_customer_selected
+            self,
+            self.customer_model,
+            on_select=self._handle_customer_selected,
         )
 
     def _handle_customer_selected(self, customer: dict):
         self.selected_customer = customer
-        self.customer_button.configure(text=f"{customer['name']}  (ganti)")
+        self._set_customer_button(customer)
 
-    # ------------------------------------------------------------------
-    # Baris scan/cari barang
-    # ------------------------------------------------------------------
-    def _build_search_row(self):
-        wrapper = ctk.CTkFrame(self, fg_color="transparent")
-        wrapper.pack(fill="x", padx=32)
-
-        search_row = ctk.CTkFrame(wrapper, fg_color="transparent")
-        search_row.pack(fill="x")
-
-        self.search_entry = ctk.CTkEntry(
-            search_row,
-            placeholder_text="Scan barcode atau cari nama barang...",
-            height=40,
-        )
-        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.search_entry.bind("<KeyRelease>", self._on_search_change)
-        self.search_entry.bind("<Return>", self._on_search_enter)
-
-        ctk.CTkButton(
-            search_row, text="+ Barang Manual", height=40, width=150,
-            fg_color="gray70", hover_color="gray60",
-            command=self._open_manual_item_dialog,
-        ).pack(side="left")
-
-        self.results_frame = ctk.CTkFrame(wrapper, fg_color=("white", "gray17"))
-        # results_frame di-pack hanya saat ada hasil (lihat _render_results)
-
-        self.search_entry.focus()
+    # ==================================================================
+    # SEARCH LOGIC
+    # ==================================================================
 
     def _on_search_change(self, event=None):
+        if event and event.keysym in (
+            "Up",
+            "Down",
+            "Return",
+            "Escape",
+        ):
+            return
+
         query = self.search_entry.get().strip()
+
+        if self._search_after_id:
+            try:
+                self.after_cancel(self._search_after_id)
+            except Exception:
+                pass
+
+            self._search_after_id = None
+
         if not query:
             self._current_results = []
-            self._hide_results()
+            self._selected_result_index = -1
+            self._hide_search_popup()
+            return
+
+        self._search_after_id = self.after(
+            120,
+            lambda q=query: self._perform_search(q),
+        )
+
+    def _perform_search(self, query: str):
+        self._search_after_id = None
+
+        if query != self.search_entry.get().strip():
             return
 
         try:
-            self._current_results = self.product_model.list_products(search=query)[:MAX_SEARCH_RESULTS]
+            barcode_product = self.product_model.get_by_barcode(query)
+
+            if barcode_product:
+                self._current_results = [barcode_product]
+            else:
+                self._current_results = (
+                    self.product_model.list_products(search=query)
+                    [:MAX_SEARCH_RESULTS]
+                )
+
         except Exception:
-            # Gagal cari terjadi di tiap ketikan - jangan ganggu dengan popup,
-            # cukup kosongkan hasil dan beri tahu lewat status di bawah judul.
             self._current_results = []
-            self._hide_results()
-            self._show_error("Gagal mencari barang. Periksa koneksi ke database.")
+            self._selected_result_index = -1
+            self._hide_search_popup()
+
+            show_error(
+                self,
+                "Pencarian Gagal",
+                "Gagal mencari barang. Periksa database lalu coba lagi.",
+            )
             return
 
-        self._render_results()
+        self._selected_result_index = (
+            0 if self._current_results else -1
+        )
 
-    def _render_results(self):
-        for widget in self.results_frame.winfo_children():
-            widget.destroy()
+        self._render_search_popup()
+
+    # ==================================================================
+    # POPUP HASIL BARANG
+    # ==================================================================
+
+    def _render_search_popup(self):
+        self._hide_search_popup()
 
         if not self._current_results:
-            self._hide_results()
             return
 
-        self.results_frame.pack(fill="x", pady=(0, 8))
-        for product in self._current_results:
-            label = f"{product['name']}  ·  {format_rupiah(product['price'])}"
-            if product["barcode"]:
-                label += f"  ·  {product['barcode']}"
+        self._search_popup = ctk.CTkToplevel(self)
 
-            btn = ctk.CTkButton(
-                self.results_frame, text=label, anchor="w",
-                fg_color="transparent", hover_color=("gray85", "gray25"),
-                text_color=("gray10", "gray90"),
-                command=lambda p=product: self._select_search_result(p),
+        self._search_popup.overrideredirect(True)
+        self._search_popup.transient(self.winfo_toplevel())
+
+        self.update_idletasks()
+
+        x = self.search_entry.winfo_rootx()
+        y = (
+            self.search_entry.winfo_rooty()
+            + self.search_entry.winfo_height()
+            + SPACING["xs"]
+        )
+
+        width = max(
+            self.search_entry.winfo_width(),
+            SEARCH_POPUP_MIN_WIDTH,
+        )
+
+        height = min(
+            len(self._current_results) * SEARCH_ROW_HEIGHT + SPACING["sm"],
+            SEARCH_POPUP_MAX_HEIGHT,
+        )
+
+        self._search_popup.geometry(f"{width}x{height}+{x}+{y}")
+        self._search_popup.configure(fg_color=COLORS["surface"])
+
+        container = ctk.CTkFrame(
+            self._search_popup,
+            fg_color=COLORS["surface"],
+            border_width=1,
+            border_color=COLORS["border"],
+            corner_radius=RADIUS["medium"],
+        )
+        container.pack(fill="both", expand=True)
+
+        for index, product in enumerate(self._current_results):
+            self._build_search_result(container, index, product)
+
+        self._update_search_selection()
+
+    def _build_search_result(
+        self,
+        parent,
+        index: int,
+        product: dict,
+    ):
+        row = ctk.CTkFrame(
+            parent,
+            fg_color="transparent",
+            corner_radius=RADIUS["small"],
+        )
+        row.pack(fill="x", padx=SPACING["xs"], pady=2)
+        row.grid_columnconfigure(0, weight=1)
+
+        name_label = ctk.CTkLabel(
+            row,
+            text=product["name"],
+            anchor="w",
+            font=get_font("button"),
+            text_color=COLORS["text"],
+        )
+        name_label.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(SPACING["md"], SPACING["sm"]),
+            pady=(SPACING["sm"] - 2, 0),
+        )
+
+        stock_text = f"Stok: {product.get('stock', 0)}"
+
+        if product.get("barcode"):
+            stock_text += f"   ·   Barcode: {product['barcode']}"
+
+        detail_label = ctk.CTkLabel(
+            row,
+            text=(
+                f"{format_rupiah(product['selling_price'])}"
+                f"   ·   {stock_text}"
+            ),
+            anchor="w",
+            font=get_font("small"),
+            text_color=COLORS["text_secondary"],
+        )
+        detail_label.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=(SPACING["md"], SPACING["sm"]),
+            pady=(0, SPACING["sm"] - 2),
+        )
+
+        for widget in (row, name_label, detail_label):
+            widget.bind(
+                "<Button-1>",
+                lambda event, i=index: self._select_search_result(i),
             )
-            btn.pack(fill="x", padx=4, pady=2)
 
-    def _hide_results(self):
-        self.results_frame.pack_forget()
+        row.bind(
+            "<Enter>",
+            lambda event, i=index: self._set_search_selection(i),
+        )
 
-    def _select_search_result(self, product: dict):
+    def _set_search_selection(self, index: int):
+        if not self._current_results:
+            return
+
+        if index < 0 or index >= len(self._current_results):
+            return
+
+        self._selected_result_index = index
+        self._update_search_selection()
+
+    def _update_search_selection(self):
+        if not self._search_popup:
+            return
+
+        children = self._search_popup.winfo_children()
+
+        if not children:
+            return
+
+        for index, row in enumerate(children[0].winfo_children()):
+            if index == self._selected_result_index:
+                row.configure(fg_color=COLORS["table_selected"])
+            else:
+                row.configure(fg_color="transparent")
+
+    def _select_search_result(self, index: int):
+        if not self._current_results:
+            return
+
+        if index < 0 or index >= len(self._current_results):
+            return
+
+        product = self._current_results[index]
+
+        # Tutup popup lebih dulu agar dialog pesan tidak tertutup popup.
+        self._hide_search_popup()
+
         self._add_product_to_cart(product)
         self._clear_search()
 
+    def _on_search_down(self, event=None):
+        if not self._current_results:
+            return "break"
+
+        if self._selected_result_index < len(self._current_results) - 1:
+            self._selected_result_index += 1
+        else:
+            self._selected_result_index = 0
+
+        self._update_search_selection()
+
+        return "break"
+
+    def _on_search_up(self, event=None):
+        if not self._current_results:
+            return "break"
+
+        if self._selected_result_index > 0:
+            self._selected_result_index -= 1
+        else:
+            self._selected_result_index = len(self._current_results) - 1
+
+        self._update_search_selection()
+
+        return "break"
+
     def _on_search_enter(self, event=None):
         query = self.search_entry.get().strip()
-        if not query:
-            return
 
-        # 1. Cocokkan barcode persis dulu (ini yang terjadi saat scan sungguhan).
+        if not query:
+            return "break"
+
         try:
             product = self.product_model.get_by_barcode(query)
+
         except Exception:
-            self._show_error("Gagal memeriksa barcode. Periksa koneksi ke database.")
-            return
+            show_error(
+                self,
+                "Pencarian Gagal",
+                "Gagal memeriksa barcode. Periksa database lalu coba lagi.",
+            )
+            return "break"
+
         if product:
+            self._hide_search_popup()
             self._add_product_to_cart(product)
             self._clear_search()
-            return
+            return "break"
 
-        # 2. Jika hasil pencarian nama tinggal satu, anggap itu yang dimaksud.
-        if len(self._current_results) == 1:
-            self._add_product_to_cart(self._current_results[0])
-            self._clear_search()
-            return
+        if self._current_results:
+            index = self._selected_result_index
 
-        # 3. Tidak ditemukan sama sekali -> tawarkan pilihan (sesuai alur barcode scanner).
-        if not self._current_results:
-            BarcodeNotFoundDialog(
-                self,
-                code=query,
-                on_add_as_product=lambda: self._open_manual_item_dialog(prefill_barcode=query),
-                on_add_manual_only=lambda: self._open_manual_item_dialog(
-                    prefill_barcode="", prefill_name="", one_off=True
-                ),
-            )
-        # Jika hasil > 1, biarkan pengguna klik salah satu dari daftar hasil.
+            if index < 0:
+                index = 0
 
-    def _clear_search(self):
-        self.search_entry.delete(0, "end")
-        self._current_results = []
-        self._hide_results()
-        self.search_entry.focus()
+            self._select_search_result(index)
+            return "break"
 
-    # ------------------------------------------------------------------
-    # Keranjang (cart)
-    # ------------------------------------------------------------------
-    def _build_cart_area(self):
-        header_row = ctk.CTkFrame(self, fg_color="transparent")
-        header_row.pack(fill="x", padx=32, pady=(4, 0))
-        columns = [("Barang", 3), ("Qty", 2), ("Harga", 2), ("Subtotal", 2), ("Aksi", 1)]
-        for col, (_, weight) in enumerate(columns):
-            header_row.grid_columnconfigure(col, weight=weight)
-        for col, (text, _) in enumerate(columns):
-            ctk.CTkLabel(
-                header_row, text=text, font=ctk.CTkFont(size=12, weight="bold"), text_color="gray50"
-            ).grid(row=0, column=col, sticky="w", padx=8, pady=(8, 4))
-
-        self.cart_frame = ctk.CTkScrollableFrame(self, fg_color=("white", "gray17"), height=220)
-        self.cart_frame.pack(fill="both", expand=True, padx=32, pady=(0, 8))
-        for col, weight in [(0, 3), (1, 2), (2, 2), (3, 2), (4, 1)]:
-            self.cart_frame.grid_columnconfigure(col, weight=weight)
-
-    def _add_product_to_cart(self, product: dict, quantity: int = 1):
-        self._add_item_to_cart(
-            product_id=product["id"],
-            product_name=product["name"],
-            price=product["price"],
-            quantity=quantity,
+        show_warning(
+            self,
+            "Barang Tidak Ditemukan",
+            "Barang tidak ditemukan di master produk.",
         )
 
-    def _add_item_to_cart(self, product_id, product_name: str, price: int, quantity: int = 1):
-        # Gabungkan dengan baris yang sudah ada jika barang & harga sama,
-        # supaya scan berulang cukup menambah qty (bukan bikin baris baru).
+        return "break"
+
+    def _on_search_escape(self, event=None):
+        self._current_results = []
+        self._selected_result_index = -1
+        self._hide_search_popup()
+
+        return "break"
+
+    def _hide_search_popup(self):
+        if self._search_popup is not None:
+            try:
+                if self._search_popup.winfo_exists():
+                    self._search_popup.destroy()
+            except Exception:
+                pass
+
+        self._search_popup = None
+
+    def _clear_search(self):
+        self._current_results = []
+        self._selected_result_index = -1
+
+        self._hide_search_popup()
+
+        self.search_entry.delete(0, "end")
+        self.search_entry.focus()
+
+    # ==================================================================
+    # KERANJANG
+    # ==================================================================
+
+    def _add_product_to_cart(
+        self,
+        product: dict,
+        quantity: int = 1,
+    ):
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            quantity = 1
+
+        if quantity <= 0:
+            quantity = 1
+
+        product_id = product["id"]
+        product_name = product["name"]
+        price = int(product["selling_price"])
+        stock = int(product.get("stock") or 0)
+
+        if stock <= 0:
+            show_warning(
+                self,
+                "Stok Habis",
+                f"Stok {product_name} habis.",
+            )
+            return
+
+        if quantity > stock:
+            show_warning(
+                self,
+                "Stok Tidak Cukup",
+                f"Stok {product_name} hanya {stock}. "
+                "Qty tidak dapat melebihi stok.",
+            )
+            return
+
         for row in self.cart:
-            if row["product_id"] == product_id and row["product_name"] == product_name and row["price"] == price:
-                row["quantity"] += quantity
+            if row["product_id"] == product_id:
+                new_quantity = row["quantity"] + quantity
+
+                if new_quantity > stock:
+                    show_warning(
+                        self,
+                        "Stok Tidak Cukup",
+                        f"Stok {product_name} hanya {stock}. "
+                        "Qty tidak dapat melebihi stok.",
+                    )
+                    return
+
+                row["quantity"] = new_quantity
+                self.cart.remove(row)
+                self.cart.insert(0, row)
+
                 self._render_cart()
                 return
 
-        self.cart.append({
-            "row_id": str(uuid.uuid4()),
-            "product_id": product_id,
-            "product_name": product_name,
-            "quantity": quantity,
-            "price": price,
-        })
+        self.cart.insert(
+            0,
+            {
+                "row_id": str(uuid.uuid4()),
+                "product_id": product_id,
+                "product_name": product_name,
+                "quantity": quantity,
+                "price": price,
+            },
+        )
+
         self._render_cart()
 
-    def _change_quantity(self, row_id: str, delta: int):
+    def _change_quantity(
+        self,
+        row_id: str,
+        delta: int,
+    ):
         for row in self.cart:
-            if row["row_id"] == row_id:
-                row["quantity"] = max(1, row["quantity"] + delta)
-                break
+            if row["row_id"] != row_id:
+                continue
+
+            new_quantity = row["quantity"] + delta
+
+            if new_quantity < 1:
+                new_quantity = 1
+
+            if delta > 0:
+                try:
+                    product = self.product_model.get_by_id(
+                        row["product_id"]
+                    )
+
+                except Exception:
+                    show_error(
+                        self,
+                        "Terjadi Kesalahan",
+                        "Gagal memeriksa stok barang. Coba lagi.",
+                    )
+                    return
+
+                if not product:
+                    show_warning(
+                        self,
+                        "Barang Tidak Ditemukan",
+                        "Barang tidak ditemukan di master produk.",
+                    )
+                    return
+
+                stock = int(product.get("stock") or 0)
+
+                if new_quantity > stock:
+                    show_warning(
+                        self,
+                        "Stok Tidak Cukup",
+                        f"Stok {row['product_name']} hanya {stock}. "
+                        "Qty tidak dapat melebihi stok.",
+                    )
+                    return
+
+            row["quantity"] = new_quantity
+            break
+
         self._render_cart()
 
     def _remove_from_cart(self, row_id: str):
-        self.cart = [row for row in self.cart if row["row_id"] != row_id]
+        self.cart = [
+            row
+            for row in self.cart
+            if row["row_id"] != row_id
+        ]
+
         self._render_cart()
 
-    def _open_price_edit_dialog(self, row_id: str):
-        row = next((r for r in self.cart if r["row_id"] == row_id), None)
-        if not row:
-            return
-
-        def on_save(new_price: int):
-            row["price"] = new_price
-            self._render_cart()
-
-        PriceEditDialog(self, product_name=row["product_name"], current_price=row["price"], on_save=on_save)
-
     def _render_cart(self):
-        for widget in self.cart_frame.winfo_children():
-            widget.destroy()
+        self.cart_table.set_rows(
+            [self._cart_row(row) for row in self.cart]
+        )
 
-        if not self.cart:
-            ctk.CTkLabel(
-                self.cart_frame,
-                text="Keranjang masih kosong. Scan barcode atau cari barang di atas.",
-                text_color="gray50",
-            ).grid(row=0, column=0, columnspan=5, sticky="w", padx=8, pady=16)
-            self._update_total()
-            return
-
-        for i, row in enumerate(self.cart):
-            self._build_cart_row(i, row)
+        self.cart_count_label.configure(
+            text=f"{len(self.cart)} barang"
+        )
 
         self._update_total()
 
-    def _build_cart_row(self, row_index: int, row: dict):
+    def _cart_row(self, row: dict) -> list:
         subtotal = row["quantity"] * row["price"]
 
-        ctk.CTkLabel(self.cart_frame, text=row["product_name"], anchor="w").grid(
-            row=row_index, column=0, sticky="ew", padx=8, pady=6
+        return [
+            text_cell(row["product_name"], bold=True),
+            text_cell(format_rupiah(row["price"])),
+            lambda parent, r=row: self._build_qty_cell(parent, r),
+            text_cell(format_rupiah(subtotal), bold=True),
+            lambda parent, rid=row["row_id"]: ctk.CTkButton(
+                parent,
+                text="Hapus",
+                width=64,
+                command=lambda: self._remove_from_cart(rid),
+                **button_style("danger", "small"),
+            ),
+        ]
+
+    
+    def _build_qty_cell(self, parent, row: dict):
+        frame = ctk.CTkFrame(
+            parent,
+            fg_color="transparent",
+            width=0,
+            height=0,
         )
 
-        qty_frame = ctk.CTkFrame(self.cart_frame, fg_color="transparent")
-        qty_frame.grid(row=row_index, column=1, sticky="w", padx=8, pady=4)
+        row_id = row["row_id"]
+
         ctk.CTkButton(
-            qty_frame, text="-", width=28, height=28,
-            command=lambda rid=row["row_id"]: self._change_quantity(rid, -1),
+            frame,
+            text="−",
+            width=28,
+            command=lambda: self._change_quantity(row_id, -1),
+            **button_style("secondary", "small"),
         ).pack(side="left")
-        ctk.CTkLabel(qty_frame, text=str(row["quantity"]), width=32).pack(side="left")
+
+        qty_var = ctk.StringVar(value=str(row["quantity"]))
+
+        qty_entry = ctk.CTkEntry(
+            frame,
+            width=52,
+            height=30,
+            textvariable=qty_var,
+            justify="center",
+            font=get_font("button"),
+        )
+        qty_entry.pack(side="left", padx=SPACING["xs"])
+
+        def apply_quantity(event=None):
+            value = qty_var.get().strip()
+
+            try:
+                quantity = int(value)
+            except (TypeError, ValueError):
+                show_warning(
+                    self,
+                    "Qty Tidak Valid",
+                    "Qty harus berupa bilangan bulat positif.",
+                )
+                qty_var.set(str(row["quantity"]))
+                qty_entry.selection_clear()
+                return "break"
+
+            if quantity < 1:
+                show_warning(
+                    self,
+                    "Qty Tidak Valid",
+                    "Qty minimal adalah 1.",
+                )
+                qty_var.set(str(row["quantity"]))
+                return "break"
+
+            try:
+                product = self.product_model.get_by_id(
+                    row["product_id"]
+                )
+            except Exception:
+                show_error(
+                    self,
+                    "Terjadi Kesalahan",
+                    "Gagal memeriksa stok barang. Coba lagi.",
+                )
+                qty_var.set(str(row["quantity"]))
+                return "break"
+
+            if not product:
+                show_warning(
+                    self,
+                    "Barang Tidak Ditemukan",
+                    "Barang tidak ditemukan di master produk.",
+                )
+                qty_var.set(str(row["quantity"]))
+                return "break"
+
+            stock = int(product.get("stock") or 0)
+
+            if quantity > stock:
+                show_warning(
+                    self,
+                    "Stok Tidak Cukup",
+                    f"Stok {row['product_name']} hanya {stock}.",
+                )
+                qty_var.set(str(row["quantity"]))
+                return "break"
+
+            row["quantity"] = quantity
+            self._render_cart()
+            return "break"
+
+        qty_entry.bind("<Return>", apply_quantity)
+        qty_entry.bind("<KP_Enter>", apply_quantity)
+        qty_entry.bind(
+            "<FocusOut>",
+            lambda event: qty_var.set(str(row["quantity"])),
+        )
+
         ctk.CTkButton(
-            qty_frame, text="+", width=28, height=28,
-            command=lambda rid=row["row_id"]: self._change_quantity(rid, 1),
+            frame,
+            text="+",
+            width=28,
+            command=lambda: self._change_quantity(row_id, 1),
+            **button_style("secondary", "small"),
         ).pack(side="left")
 
-        price_frame = ctk.CTkFrame(self.cart_frame, fg_color="transparent")
-        price_frame.grid(row=row_index, column=2, sticky="w", padx=8, pady=4)
-        ctk.CTkLabel(price_frame, text=format_rupiah(row["price"])).pack(side="left")
-        # Tombol edit harga sengaja dibuat kecil & tidak mencolok (fitur pelengkap).
-        ctk.CTkButton(
-            price_frame, text="ubah", width=40, height=20,
-            font=ctk.CTkFont(size=10),
-            fg_color="transparent", text_color="gray50", hover_color=("gray85", "gray25"),
-            command=lambda rid=row["row_id"]: self._open_price_edit_dialog(rid),
-        ).pack(side="left", padx=(4, 0))
-
-        ctk.CTkLabel(self.cart_frame, text=format_rupiah(subtotal), anchor="w").grid(
-            row=row_index, column=3, sticky="ew", padx=8, pady=6
-        )
-
-        ctk.CTkButton(
-            self.cart_frame, text="Hapus", width=64, height=28,
-            fg_color="#D64545", hover_color="#B93A3A",
-            command=lambda rid=row["row_id"]: self._remove_from_cart(rid),
-        ).grid(row=row_index, column=4, sticky="w", padx=8, pady=4)
-
-    # ------------------------------------------------------------------
-    # Footer: total + simpan
-    # ------------------------------------------------------------------
-    def _build_footer(self):
-        footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.pack(fill="x", padx=32, pady=(0, 24))
-        footer.grid_columnconfigure(0, weight=1)
-
-        self.total_label = ctk.CTkLabel(
-            footer, text="Total: Rp 0", font=ctk.CTkFont(size=18, weight="bold")
-        )
-        self.total_label.grid(row=0, column=0, sticky="w")
-
-        ctk.CTkButton(
-            footer, text="Simpan Hutang", height=44, width=180,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._handle_save,
-        ).grid(row=0, column=1, sticky="e")
+        return frame
 
     def _update_total(self):
-        total = sum(row["quantity"] * row["price"] for row in self.cart)
-        self.total_label.configure(text=f"Total: {format_rupiah(total)}")
+        total = sum(
+            row["quantity"] * row["price"]
+            for row in self.cart
+        )
+
+        self.total_label.configure(text=format_rupiah(total))
+
+    # ==================================================================
+    # PROSES TRANSAKSI
+    # ==================================================================
 
     def _handle_save(self):
-        self.status_label.configure(text="")
-
         if not self.selected_customer:
-            self._show_error("Pelanggan harus dipilih terlebih dahulu.")
+            show_warning(
+                self,
+                "Pelanggan Belum Dipilih",
+                "Pelanggan harus dipilih terlebih dahulu.",
+            )
             return
+
         if not self.cart:
-            self._show_error("Tambahkan minimal satu barang sebelum menyimpan.")
+            show_warning(
+                self,
+                "Keranjang Kosong",
+                "Tambahkan minimal satu barang sebelum memproses transaksi.",
+            )
             return
 
         items = [
             {
                 "product_id": row["product_id"],
-                "product_name": row["product_name"],
                 "quantity": row["quantity"],
-                "price": row["price"],
             }
             for row in self.cart
         ]
 
+        notes = self.notes_entry.get().strip()
+        should_print = self.print_var.get()
+
         try:
-            success, message, _ = self.debt_model.create_transaction(
-                customer_id=self.selected_customer["id"], items=items
+            success, message, transaction_id = (
+                self.debt_model.create_transaction(
+                    customer_id=self.selected_customer["id"],
+                    items=items,
+                    notes=notes,
+                )
             )
+
         except Exception:
-            self._show_error("Terjadi kesalahan pada database. Transaksi tidak disimpan.")
+            show_error(
+                self,
+                "Terjadi Kesalahan",
+                "Terjadi kesalahan pada database. "
+                "Transaksi tidak disimpan.",
+            )
             return
 
         if not success:
-            self._show_error(message)
+            show_error(self, "Transaksi Gagal", message)
             return
 
-        # Sukses: tampilkan pesan singkat, reset form untuk transaksi berikutnya.
+        # Cetak langsung ke PDF jika checkbox dicentang.
+        print_error = None
+
+        if should_print:
+            try:
+                transaction_detail = (
+                    self.debt_model.get_transaction_detail(
+                        transaction_id
+                    )
+                )
+
+                if not transaction_detail:
+                    raise PrinterError(
+                        "Detail transaksi hutang tidak ditemukan."
+                    )
+
+                printer = Printer()
+
+                pdf_path = printer.create_pdf(
+                    document_type="debt",
+                    data=transaction_detail,
+                )
+
+                printer.open_pdf(pdf_path)
+
+            except Exception as exc:
+                print_error = str(exc)
+
+        self._reset_form()
+
+        if print_error:
+            show_warning(
+                self,
+                "Transaksi Berhasil",
+                f"{message}\n\nNamun nota gagal dibuat:\n{print_error}",
+            )
+        elif should_print:
+            show_success(
+                self,
+                "Transaksi Hutang",
+                f"{message}\n\nNota PDF berhasil dibuat.",
+            )
+        else:
+            show_success(self, "Transaksi Hutang", message)
+
+    # ==================================================================
+    # RESET
+    # ==================================================================
+
+    def _reset_form(self):
         self.cart = []
         self.selected_customer = None
-        self.customer_button.configure(text="[ Cari/Pilih Pelanggan ]")
-        self._render_cart()
-        self.status_label.configure(text=f"✓ {message}")
+
+        self._set_customer_button(None)
+
+        self.notes_entry.delete(0, "end")
+        self.print_var.set(False)
+
         self._clear_search()
+        self._render_cart()
 
-    def _show_error(self, message: str):
-        self.status_label.configure(text=message, text_color="#D64545")
-
-    # ------------------------------------------------------------------
-    # Dialog barang manual
-    # ------------------------------------------------------------------
-    def _open_manual_item_dialog(self, prefill_barcode: str = "", prefill_name: str = "", one_off: bool = False):
-        ManualItemDialog(
-            self,
-            product_model=self.product_model,
-            prefill_barcode=prefill_barcode,
-            prefill_name=prefill_name,
-            one_off=one_off,
-            on_add=self._add_item_to_cart,
-        )
-
-
-class CustomerPickerDialog(ctk.CTkToplevel):
-    """Dialog cari & pilih pelanggan (hanya pelanggan aktif)."""
-
-    def __init__(self, master, customer_model: CustomerModel, on_select):
-        super().__init__(master)
-        self.customer_model = customer_model
-        self.on_select = on_select
-
-        self.title("Pilih Pelanggan")
-        self.geometry("400x480")
-        self.resizable(False, False)
-        self.transient(master)
-        self.grab_set()
-
-        ctk.CTkLabel(self, text="Pilih Pelanggan", font=ctk.CTkFont(size=16, weight="bold")).pack(
-            padx=20, pady=(20, 8), anchor="w"
-        )
-
-        self.search_entry = ctk.CTkEntry(self, placeholder_text="Cari nama pelanggan...", height=36)
-        self.search_entry.pack(fill="x", padx=20, pady=(0, 12))
-        self.search_entry.bind("<KeyRelease>", lambda e: self._render_list())
-
-        self.list_frame = ctk.CTkScrollableFrame(self, fg_color=("white", "gray17"))
-        self.list_frame.pack(fill="both", expand=True, padx=20, pady=(0, 16))
-
-        self.search_entry.focus()
-        self._render_list()
-
-    def _render_list(self):
-        for widget in self.list_frame.winfo_children():
-            widget.destroy()
-
-        try:
-            customers = self.customer_model.list_customers(search=self.search_entry.get())
-        except Exception:
-            ctk.CTkLabel(
-                self.list_frame, text="Gagal memuat daftar pelanggan. Coba lagi.",
-                text_color="#D64545",
-            ).pack(anchor="w", padx=8, pady=12)
-            return
-
-        if not customers:
-            ctk.CTkLabel(self.list_frame, text="Pelanggan tidak ditemukan.", text_color="gray50").pack(
-                anchor="w", padx=8, pady=12
-            )
-            return
-
-        for customer in customers:
-            btn = ctk.CTkButton(
-                self.list_frame,
-                text=f"{customer['name']}   ·   {customer['status']}",
-                anchor="w",
-                fg_color="transparent", hover_color=("gray85", "gray25"),
-                text_color=("gray10", "gray90"),
-                command=lambda c=customer: self._select(c),
-            )
-            btn.pack(fill="x", padx=4, pady=2)
-
-    def _select(self, customer: dict):
-        self.on_select(customer)
-        self.destroy()
-
-
-class ManualItemDialog(ctk.CTkToplevel):
-    """
-    Dialog "+ Barang Manual": untuk barang tanpa barcode, belum ada di
-    database, atau ingin dicatat langsung tanpa disimpan sebagai barang
-    master (one_off=True).
-    """
-
-    def __init__(self, master, product_model: ProductModel, on_add, prefill_barcode="", prefill_name="", one_off=False):
-        super().__init__(master)
-        self.product_model = product_model
-        self.on_add = on_add
-        self.one_off = one_off
-
-        self.title("Barang Manual")
-        self.geometry("360x420")
-        self.resizable(False, False)
-        self.transient(master)
-        self.grab_set()
-
-        ctk.CTkLabel(self, text="+ Barang Manual", font=ctk.CTkFont(size=16, weight="bold")).pack(
-            padx=20, pady=(20, 4), anchor="w"
-        )
-        ctk.CTkLabel(
-            self,
-            text="Untuk barang tanpa barcode atau belum ada di database.",
-            text_color="gray50",
-        ).pack(padx=20, anchor="w", pady=(0, 12))
-
-        form = ctk.CTkFrame(self, fg_color="transparent")
-        form.pack(fill="both", expand=True, padx=20)
-
-        ctk.CTkLabel(form, text="Nama Barang *", anchor="w").pack(fill="x")
-        self.name_entry = ctk.CTkEntry(form, height=36)
-        self.name_entry.pack(fill="x", pady=(2, 12))
-        self.name_entry.insert(0, prefill_name)
-
-        ctk.CTkLabel(form, text="Harga *", anchor="w").pack(fill="x")
-        self.price_entry = ctk.CTkEntry(form, height=36, placeholder_text="contoh: 3000")
-        self.price_entry.pack(fill="x", pady=(2, 12))
-
-        ctk.CTkLabel(form, text="Qty *", anchor="w").pack(fill="x")
-        self.qty_entry = ctk.CTkEntry(form, height=36)
-        self.qty_entry.pack(fill="x", pady=(2, 12))
-        self.qty_entry.insert(0, "1")
-
-        self._barcode_for_new_product = prefill_barcode
-        if not one_off:
-            self.save_as_product_var = ctk.BooleanVar(value=True)
-            self.save_as_product_check = ctk.CTkCheckBox(
-                form, text="Simpan juga sebagai barang baru di database",
-                variable=self.save_as_product_var,
-            )
-            self.save_as_product_check.pack(anchor="w", pady=(0, 8))
-        else:
-            self.save_as_product_var = ctk.BooleanVar(value=False)
-
-        self.error_label = ctk.CTkLabel(form, text="", text_color="#D64545")
-        self.error_label.pack(fill="x", pady=(0, 4))
-
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=20, pady=(8, 20))
-        btn_row.grid_columnconfigure((0, 1), weight=1)
-
-        ctk.CTkButton(
-            btn_row, text="Batal", fg_color="gray70", hover_color="gray60", command=self.destroy
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(btn_row, text="Tambahkan", command=self._submit).grid(
-            row=0, column=1, sticky="ew", padx=(6, 0)
-        )
-
-        self.name_entry.focus()
-
-    def _submit(self):
-        name = self.name_entry.get().strip()
-        if not name:
-            self.error_label.configure(text="Nama barang wajib diisi.")
-            return
-
-        try:
-            price = int(round(float(self.price_entry.get().strip())))
-            if price < 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            self.error_label.configure(text="Harga harus berupa angka dan tidak boleh negatif.")
-            return
-
-        try:
-            qty = int(self.qty_entry.get().strip())
-            if qty <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            self.error_label.configure(text="Qty harus berupa angka bulat lebih besar dari 0.")
-            return
-
-        product_id = None
-        if self.save_as_product_var.get():
-            try:
-                ok, msg, new_id = self.product_model.add_product(
-                    name=name, price=price, barcode=self._barcode_for_new_product, unit=""
-                )
-            except Exception:
-                ok, new_id = False, None
-            if ok:
-                product_id = new_id
-            # Jika gagal simpan sebagai produk (mis. barcode duplikat, atau
-            # kesalahan database tak terduga), tetap lanjutkan sebagai
-            # barang manual pada transaksi ini saja - jangan sampai batal
-            # menambahkan barang hanya karena gagal menyimpan ke master.
-
-        self.on_add(product_id=product_id, product_name=name, price=price, quantity=qty)
-        self.destroy()
-
-
-class PriceEditDialog(ctk.CTkToplevel):
-    """Dialog kecil untuk mengubah harga khusus baris transaksi ini saja."""
-
-    def __init__(self, master, product_name: str, current_price: int, on_save):
-        super().__init__(master)
-        self.on_save = on_save
-
-        self.title("Ubah Harga")
-        self.geometry("320x220")
-        self.resizable(False, False)
-        self.transient(master)
-        self.grab_set()
-
-        ctk.CTkLabel(self, text=f"Ubah harga: {product_name}", font=ctk.CTkFont(size=14, weight="bold")).pack(
-            padx=20, pady=(20, 4), anchor="w"
-        )
-        ctk.CTkLabel(
-            self, text="Perubahan ini hanya berlaku untuk transaksi ini saja.", text_color="gray50", wraplength=280,
-        ).pack(padx=20, anchor="w", pady=(0, 12))
-
-        self.price_entry = ctk.CTkEntry(self, height=36)
-        self.price_entry.pack(fill="x", padx=20)
-        self.price_entry.insert(0, str(current_price))
-        self.price_entry.focus()
-
-        self.error_label = ctk.CTkLabel(self, text="", text_color="#D64545")
-        self.error_label.pack(fill="x", padx=20, pady=(6, 0))
-
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=20, pady=(16, 20))
-        btn_row.grid_columnconfigure((0, 1), weight=1)
-
-        ctk.CTkButton(
-            btn_row, text="Batal", fg_color="gray70", hover_color="gray60", command=self.destroy
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(btn_row, text="Simpan", command=self._submit).grid(
-            row=0, column=1, sticky="ew", padx=(6, 0)
-        )
-
-    def _submit(self):
-        try:
-            price = int(round(float(self.price_entry.get().strip())))
-            if price < 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            self.error_label.configure(text="Harga harus berupa angka dan tidak boleh negatif.")
-            return
-
-        self.on_save(price)
-        self.destroy()
-
-
-class BarcodeNotFoundDialog(ctk.CTkToplevel):
-    """
-    Muncul ketika kode yang di-scan/diketik tidak cocok dengan barang
-    manapun. Menawarkan pilihan lanjutan sesuai alur barcode di spesifikasi.
-    """
-
-    def __init__(self, master, code: str, on_add_as_product, on_add_manual_only):
-        super().__init__(master)
-
-        self.title("Barang Tidak Ditemukan")
-        self.geometry("360x260")
-        self.resizable(False, False)
-        self.transient(master)
-        self.grab_set()
-
-        ctk.CTkLabel(
-            self, text="Barang Tidak Ditemukan", font=ctk.CTkFont(size=16, weight="bold")
-        ).pack(padx=20, pady=(20, 4), anchor="w")
-        ctk.CTkLabel(
-            self, text=f"Kode \"{code}\" tidak cocok dengan barang manapun.", text_color="gray50", wraplength=300,
-        ).pack(padx=20, anchor="w", pady=(0, 16))
-
-        ctk.CTkButton(
-            self, text="Tambah sebagai Barang Baru", height=38,
-            command=lambda: self._choose(on_add_as_product),
-        ).pack(fill="x", padx=20, pady=4)
-
-        ctk.CTkButton(
-            self, text="Input Manual (hanya transaksi ini)", height=38,
-            fg_color="gray70", hover_color="gray60",
-            command=lambda: self._choose(on_add_manual_only),
-        ).pack(fill="x", padx=20, pady=4)
-
-        ctk.CTkButton(
-            self, text="Batal", height=38,
-            fg_color="transparent", border_width=1, text_color=("gray10", "gray90"),
-            command=self.destroy,
-        ).pack(fill="x", padx=20, pady=(4, 20))
-
-    def _choose(self, action):
-        self.destroy()
-        action()
+    def _clear_transaction(self):
+        self._reset_form()

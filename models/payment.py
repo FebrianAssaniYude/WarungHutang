@@ -1,11 +1,3 @@
-"""
-models/payment.py
-
-Logika pembayaran: pembayaran hanya dikaitkan ke PELANGGAN (bukan ke
-transaksi hutang tertentu), sesuai spesifikasi. Mendukung pembayaran
-sebagian, dan menolak pembayaran yang melebihi sisa hutang saat ini.
-"""
-
 from database.database import Database
 from utils.formatter import format_rupiah
 
@@ -35,14 +27,21 @@ class PaymentModel:
         """
         Mencatat pembayaran baru untuk seorang pelanggan.
 
-        Aturan (sesuai spesifikasi):
-        - lebih kecil dari sisa -> sisa berkurang (diperbolehkan)
-        - sama dengan sisa -> status jadi Lunas (diperbolehkan)
+        Snapshot yang disimpan:
+        - total_debt_at_payment:
+            Total seluruh hutang pelanggan sebelum pembayaran ini.
+        - remaining_debt_at_payment:
+            Sisa hutang setelah pembayaran ini.
+
+        Aturan:
+        - lebih kecil dari sisa -> sisa berkurang
+        - sama dengan sisa -> status Lunas
         - lebih besar dari sisa -> DITOLAK
 
         Returns:
             (sukses: bool, pesan: str, payment_id: int|None)
         """
+
         if not customer_id:
             return False, "Pelanggan harus dipilih.", None
 
@@ -57,20 +56,34 @@ class PaymentModel:
         try:
             with self.db.transaction() as conn:
                 customer = conn.execute(
-                    "SELECT id FROM customers WHERE id = ?;", (customer_id,)
+                    """
+                    SELECT id
+                    FROM customers
+                    WHERE id = ?;
+                    """,
+                    (customer_id,),
                 ).fetchone()
+
                 if not customer:
-                    raise LookupError("Pelanggan tidak ditemukan.")
+                    raise LookupError(
+                        "Pelanggan tidak ditemukan."
+                    )
 
                 total_debt = conn.execute(
-                    "SELECT COALESCE(SUM(total_amount), 0) AS total "
-                    "FROM debt_transactions WHERE customer_id = ?;",
+                    """
+                    SELECT COALESCE(SUM(total_amount), 0) AS total
+                    FROM debt_transactions
+                    WHERE customer_id = ?;
+                    """,
                     (customer_id,),
                 ).fetchone()["total"]
 
                 total_paid = conn.execute(
-                    "SELECT COALESCE(SUM(amount), 0) AS total "
-                    "FROM payments WHERE customer_id = ?;",
+                    """
+                    SELECT COALESCE(SUM(amount), 0) AS total
+                    FROM payments
+                    WHERE customer_id = ?;
+                    """,
                     (customer_id,),
                 ).fetchone()["total"]
 
@@ -78,19 +91,79 @@ class PaymentModel:
 
                 if amount_value > sisa:
                     raise ValueError(
-                        f"Pembayaran melebihi sisa hutang. Sisa saat ini: {format_rupiah(sisa)}."
+                        "Pembayaran melebihi sisa hutang. "
+                        f"Sisa saat ini: {format_rupiah(sisa)}."
                     )
 
+                total_debt_at_payment = sisa
+                remaining_debt = sisa - amount_value
+
                 cursor = conn.execute(
-                    "INSERT INTO payments (customer_id, amount, notes) VALUES (?, ?, ?);",
-                    (customer_id, amount_value, (notes or "").strip() or None),
+                    """
+                    INSERT INTO payments (
+                        customer_id,
+                        amount,
+                        notes,
+                        total_debt_at_payment,
+                        remaining_debt_at_payment
+                    )
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    (
+                        customer_id,
+                        amount_value,
+                        (notes or "").strip() or None,
+                        total_debt_at_payment,
+                        remaining_debt,
+                    ),
                 )
+
                 payment_id = cursor.lastrowid
+
         except LookupError as e:
             return False, str(e), None
+
         except ValueError as e:
             return False, str(e), None
+
         except Exception:
-            return False, "Terjadi kesalahan saat menyimpan pembayaran ke database.", None
+            return (
+                False,
+                "Terjadi kesalahan saat menyimpan pembayaran ke database.",
+                None,
+            )
 
         return True, "Pembayaran berhasil disimpan.", payment_id
+
+    def get_payment_detail(self, payment_id: int):
+        """
+        Mengambil detail satu pembayaran berdasarkan ID.
+
+        Returns:
+            dict atau None jika pembayaran tidak ditemukan.
+        """
+
+        if not payment_id:
+            return None
+
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    p.id,
+                    p.customer_id,
+                    c.name AS customer_name,
+                    p.payment_date,
+                    p.amount,
+                    p.notes,
+                    p.total_debt_at_payment,
+                    p.remaining_debt_at_payment
+                FROM payments p
+                JOIN customers c
+                    ON c.id = p.customer_id
+                WHERE p.id = ?;
+                """,
+                (payment_id,),
+            ).fetchone()
+
+        return dict(row) if row else None

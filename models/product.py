@@ -1,15 +1,3 @@
-"""
-models/product.py
-
-Logika data barang: daftar, tambah, edit, nonaktifkan (soft delete),
-dan pencarian (berdasarkan nama maupun barcode).
-
-Barcode boleh NULL/kosong karena tidak semua barang memiliki barcode.
-Kolom "barcode" di schema.sql memakai UNIQUE, tapi SQLite mengizinkan
-banyak baris NULL pada kolom UNIQUE (NULL tidak dianggap sama dengan
-NULL lain), jadi banyak barang tanpa barcode tetap bisa disimpan.
-"""
-
 import sqlite3
 
 from database.database import Database
@@ -24,143 +12,508 @@ class ProductModel:
     # ------------------------------------------------------------------
     def list_products(self, search: str = "", include_inactive: bool = False):
         """
-        Daftar barang, opsional difilter oleh 'search' yang mencocokkan
-        nama ATAU barcode (LIKE), diurutkan berdasarkan nama.
+        Mengembalikan daftar produk.
+
+        Search mencocokkan nama atau barcode.
+        Barcode bersifat opsional.
         """
-        query = "SELECT id, barcode, name, price, unit, is_active FROM products"
+        query = """
+            SELECT
+                p.id,
+                p.barcode,
+                p.name,
+                p.purchase_price,
+                p.selling_price,
+                p.stock,
+                p.opening_stock,
+                p.supplier_id,
+                s.name AS supplier_name,
+                p.image_path,
+                p.unit,
+                p.is_active,
+                p.created_at,
+                p.updated_at
+            FROM products p
+            LEFT JOIN suppliers s
+                ON s.id = p.supplier_id
+        """
+
         conditions = []
         params = []
 
         if not include_inactive:
-            conditions.append("is_active = 1")
+            conditions.append("p.is_active = 1")
+
+        search = (search or "").strip()
+
         if search:
-            conditions.append("(name LIKE ? OR barcode LIKE ?)")
-            like_term = f"%{search.strip()}%"
+            conditions.append(
+                "(p.name LIKE ? OR p.barcode LIKE ?)"
+            )
+            like_term = f"%{search}%"
             params.extend([like_term, like_term])
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY name COLLATE NOCASE ASC;"
+
+        query += " ORDER BY p.name COLLATE NOCASE ASC;"
 
         with self.db.transaction() as conn:
             rows = conn.execute(query, params).fetchall()
-            return [dict(row) for row in rows]
 
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Detail
+    # ------------------------------------------------------------------
     def get_by_id(self, product_id: int):
         with self.db.transaction() as conn:
             row = conn.execute(
-                "SELECT id, barcode, name, price, unit, is_active FROM products WHERE id = ?;",
+                """
+                SELECT
+                    p.id,
+                    p.barcode,
+                    p.name,
+                    p.purchase_price,
+                    p.selling_price,
+                    p.stock,
+                    p.opening_stock,
+                    p.supplier_id,
+                    s.name AS supplier_name,
+                    p.image_path,
+                    p.unit,
+                    p.is_active,
+                    p.created_at,
+                    p.updated_at
+                FROM products p
+                LEFT JOIN suppliers s
+                    ON s.id = p.supplier_id
+                WHERE p.id = ?;
+                """,
                 (product_id,),
             ).fetchone()
+
         return dict(row) if row else None
 
     def get_by_barcode(self, barcode: str, active_only: bool = True):
         """
-        Mencari satu barang berdasarkan barcode persis.
-        Dipakai saat scan barcode scanner USB.
+        Mencari produk berdasarkan barcode persis.
+
+        Barcode kosong dianggap tidak valid untuk pencarian.
         """
         barcode = (barcode or "").strip()
+
         if not barcode:
             return None
 
-        query = "SELECT id, barcode, name, price, unit, is_active FROM products WHERE barcode = ?"
+        query = """
+            SELECT
+                p.id,
+                p.barcode,
+                p.name,
+                p.purchase_price,
+                p.selling_price,
+                p.stock,
+                p.opening_stock,
+                p.supplier_id,
+                s.name AS supplier_name,
+                p.image_path,
+                p.unit,
+                p.is_active,
+                p.created_at,
+                p.updated_at
+            FROM products p
+            LEFT JOIN suppliers s
+                ON s.id = p.supplier_id
+            WHERE p.barcode = ?
+        """
+
         params = [barcode]
+
         if active_only:
-            query += " AND is_active = 1"
+            query += " AND p.is_active = 1"
+
         query += ";"
 
         with self.db.transaction() as conn:
             row = conn.execute(query, params).fetchone()
+
         return dict(row) if row else None
 
     # ------------------------------------------------------------------
-    # Tambah / edit / nonaktifkan
+    # Tambah produk
     # ------------------------------------------------------------------
-    def add_product(self, name: str, price, barcode: str = "", unit: str = ""):
-        """Returns (sukses: bool, pesan: str, product_id: int|None)."""
+    def add_product(
+        self,
+        name: str,
+        purchase_price,
+        selling_price,
+        opening_stock=0,
+        barcode: str = "",
+        supplier_id=None,
+        image_path: str = "",
+    ):
+        """
+        Returns:
+            (success: bool, message: str, product_id: int | None)
+
+        Saat produk baru dibuat:
+            opening_stock = stok awal
+            stock         = stok awal
+
+        Field `price` legacy disamakan dengan selling_price
+        untuk menjaga kompatibilitas dengan kode lama.
+        """
         name = (name or "").strip()
+
         if not name:
             return False, "Nama barang wajib diisi.", None
 
-        valid, price_value, price_error = self._validate_price(price)
+        valid, purchase_value, error = self._validate_price(purchase_price)
         if not valid:
-            return False, price_error, None
+            return False, f"Harga beli: {error}", None
+
+        valid, selling_value, error = self._validate_price(selling_price)
+        if not valid:
+            return False, f"Harga jual: {error}", None
+
+        valid, stock_value, error = self._validate_stock(opening_stock)
+        if not valid:
+            return False, f"Stok awal: {error}", None
 
         barcode = (barcode or "").strip() or None
-        unit = (unit or "").strip() or None
+        image_path = (image_path or "").strip() or None
 
         try:
             with self.db.transaction() as conn:
+                if supplier_id is not None:
+                    if not self._supplier_exists(conn, supplier_id):
+                        return False, "Supplier tidak ditemukan.", None
+
                 cursor = conn.execute(
-                    "INSERT INTO products (barcode, name, price, unit) VALUES (?, ?, ?, ?);",
-                    (barcode, name, price_value, unit),
+                    """
+                    INSERT INTO products (
+                        barcode,
+                        name,
+                        price,
+                        purchase_price,
+                        selling_price,
+                        stock,
+                        opening_stock,
+                        supplier_id,
+                        image_path
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        barcode,
+                        name,
+                        selling_value,
+                        purchase_value,
+                        selling_value,
+                        stock_value,
+                        stock_value,
+                        supplier_id,
+                        image_path,
+                    ),
                 )
-                new_id = cursor.lastrowid
-        except sqlite3.IntegrityError:
-            return False, "Barcode tersebut sudah digunakan oleh barang lain.", None
 
-        return True, "Barang berhasil ditambahkan.", new_id
+                product_id = cursor.lastrowid
 
-    def update_product(self, product_id: int, name: str, price, barcode: str = "", unit: str = ""):
-        """Returns (sukses: bool, pesan: str)."""
+        except sqlite3.IntegrityError as exc:
+            if "barcode" in str(exc).lower():
+                return (
+                    False,
+                    "Barcode tersebut sudah digunakan oleh barang lain.",
+                    None,
+                )
+
+            return False, "Data barang tidak dapat disimpan.", None
+
+        return True, "Barang berhasil ditambahkan.", product_id
+
+    # ------------------------------------------------------------------
+    # Edit produk
+    # ------------------------------------------------------------------
+    def update_product(
+        self,
+        product_id: int,
+        name: str,
+        purchase_price,
+        selling_price,
+        barcode: str = "",
+        supplier_id=None,
+        image_path: str = "",
+    ):
+        """
+        Mengedit data master produk.
+
+        Stok dan opening_stock TIDAK diubah melalui method ini.
+        """
         name = (name or "").strip()
+
         if not name:
             return False, "Nama barang wajib diisi."
 
-        valid, price_value, price_error = self._validate_price(price)
+        valid, purchase_value, error = self._validate_price(purchase_price)
         if not valid:
-            return False, price_error
+            return False, f"Harga beli: {error}"
+
+        valid, selling_value, error = self._validate_price(selling_price)
+        if not valid:
+            return False, f"Harga jual: {error}"
 
         barcode = (barcode or "").strip() or None
-        unit = (unit or "").strip() or None
+        image_path = (image_path or "").strip() or None
 
         try:
             with self.db.transaction() as conn:
                 existing = conn.execute(
-                    "SELECT id FROM products WHERE id = ?;", (product_id,)
+                    """
+                    SELECT id
+                    FROM products
+                    WHERE id = ?;
+                    """,
+                    (product_id,),
                 ).fetchone()
+
                 if not existing:
                     return False, "Barang tidak ditemukan."
 
+                if supplier_id is not None:
+                    if not self._supplier_exists(conn, supplier_id):
+                        return False, "Supplier tidak ditemukan."
+
                 conn.execute(
-                    "UPDATE products SET barcode = ?, name = ?, price = ?, unit = ?, "
-                    "updated_at = datetime('now', 'localtime') WHERE id = ?;",
-                    (barcode, name, price_value, unit, product_id),
+                    """
+                    UPDATE products
+                    SET
+                        barcode = ?,
+                        name = ?,
+                        price = ?,
+                        purchase_price = ?,
+                        selling_price = ?,
+                        supplier_id = ?,
+                        image_path = ?,
+                        updated_at = datetime('now', 'localtime')
+                    WHERE id = ?;
+                    """,
+                    (
+                        barcode,
+                        name,
+                        selling_value,
+                        purchase_value,
+                        selling_value,
+                        supplier_id,
+                        image_path,
+                        product_id,
+                    ),
                 )
-        except sqlite3.IntegrityError:
-            return False, "Barcode tersebut sudah digunakan oleh barang lain."
+
+        except sqlite3.IntegrityError as exc:
+            if "barcode" in str(exc).lower():
+                return "Data barang tidak dapat diperbarui karena barcode sudah digunakan."
+
+            return "Data barang tidak dapat diperbarui."
 
         return True, "Data barang berhasil diperbarui."
 
+    # ------------------------------------------------------------------
+    # Nonaktifkan
+    # ------------------------------------------------------------------
     def deactivate_product(self, product_id: int):
-        """Soft delete - histori transaksi lama tetap aman. Returns (sukses, pesan)."""
+        """
+        Soft delete.
+
+        Histori transaksi lama tetap aman.
+        """
         with self.db.transaction() as conn:
             existing = conn.execute(
-                "SELECT id FROM products WHERE id = ?;", (product_id,)
+                """
+                SELECT id
+                FROM products
+                WHERE id = ?;
+                """,
+                (product_id,),
             ).fetchone()
+
             if not existing:
                 return False, "Barang tidak ditemukan."
 
             conn.execute(
-                "UPDATE products SET is_active = 0, "
-                "updated_at = datetime('now', 'localtime') WHERE id = ?;",
+                """
+                UPDATE products
+                SET
+                    is_active = 0,
+                    updated_at = datetime('now', 'localtime')
+                WHERE id = ?;
+                """,
                 (product_id,),
             )
 
         return True, "Barang berhasil dinonaktifkan."
 
     # ------------------------------------------------------------------
-    # Helper internal
+    # Aktivasi kembali
+    # ------------------------------------------------------------------
+    def activate_product(self, product_id: int):
+        with self.db.transaction() as conn:
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM products
+                WHERE id = ?;
+                """,
+                (product_id,),
+            ).fetchone()
+
+            if not existing:
+                return False, "Barang tidak ditemukan."
+
+            conn.execute(
+                """
+                UPDATE products
+                SET
+                    is_active = 1,
+                    updated_at = datetime('now', 'localtime')
+                WHERE id = ?;
+                """,
+                (product_id,),
+            )
+
+        return True, "Barang berhasil diaktifkan."
+
+    # ------------------------------------------------------------------
+    # Stok
+    # ------------------------------------------------------------------
+    def increase_stock(self, product_id: int, quantity: int):
+        """
+        Menambah stok secara atomik.
+
+        Dipakai nantinya oleh transaksi pembelian.
+        """
+        valid, quantity_value, error = self._validate_quantity(quantity)
+
+        if not valid:
+            return False, error
+
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT id, stock
+                FROM products
+                WHERE id = ?;
+                """,
+                (product_id,),
+            ).fetchone()
+
+            if not row:
+                return False, "Barang tidak ditemukan."
+
+            conn.execute(
+                """
+                UPDATE products
+                SET
+                    stock = stock + ?,
+                    updated_at = datetime('now', 'localtime')
+                WHERE id = ?;
+                """,
+                (quantity_value, product_id),
+            )
+
+        return True, "Stok berhasil ditambahkan."
+
+    def decrease_stock(self, product_id: int, quantity: int):
+        """
+        Mengurangi stok secara atomik.
+
+        Jika stok tidak mencukupi, transaksi ditolak.
+        """
+        valid, quantity_value, error = self._validate_quantity(quantity)
+
+        if not valid:
+            return False, error
+
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT id, stock
+                FROM products
+                WHERE id = ?;
+                """,
+                (product_id,),
+            ).fetchone()
+
+            if not row:
+                return False, "Barang tidak ditemukan."
+
+            if row["stock"] < quantity_value:
+                return (
+                    False,
+                    f"Stok tidak mencukupi. Stok tersedia: {row['stock']}.",
+                )
+
+            conn.execute(
+                """
+                UPDATE products
+                SET
+                    stock = stock - ?,
+                    updated_at = datetime('now', 'localtime')
+                WHERE id = ?;
+                """,
+                (quantity_value, product_id),
+            )
+
+        return True, "Stok berhasil dikurangi."
+
+    # ------------------------------------------------------------------
+    # Helper
     # ------------------------------------------------------------------
     @staticmethod
-    def _validate_price(price):
-        """Returns (valid: bool, price_as_int: int|None, error_message: str|None)."""
+    def _supplier_exists(conn, supplier_id):
+        row = conn.execute(
+            """
+            SELECT id
+            FROM suppliers
+            WHERE id = ?;
+            """,
+            (supplier_id,),
+        ).fetchone()
+
+        return row is not None
+
+    @staticmethod
+    def _validate_price(value):
         try:
-            price_value = int(round(float(price)))
+            value = int(round(float(value)))
         except (TypeError, ValueError):
             return False, None, "Harga harus berupa angka."
 
-        if price_value < 0:
+        if value < 0:
             return False, None, "Harga tidak boleh negatif."
 
-        return True, price_value, None
+        return True, value, None
+
+    @staticmethod
+    def _validate_stock(value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return False, None, "Stok harus berupa angka bulat."
+
+        if value < 0:
+            return False, None, "Stok tidak boleh negatif."
+
+        return True, value, None
+
+    @staticmethod
+    def _validate_quantity(value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return False, None, "Jumlah harus berupa angka bulat."
+
+        if value <= 0:
+            return False, None, "Jumlah harus lebih dari 0."
+
+        return True, value, None

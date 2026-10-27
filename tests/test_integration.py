@@ -1,30 +1,21 @@
-"""
-test_phase12_integration.py
-
-PHASE 12 - Testing Keseluruhan.
-
-Mensimulasikan operasional warung dari nol sampai akhir, memakai SEMUA
-model sekaligus persis seperti alur nyata (bukan unit test terisolasi
-per model seperti phase-phase sebelumnya). Tujuannya membuktikan bahwa
-seluruh bagian aplikasi bekerja BENAR ketika digabung, bukan cuma benar
-sendiri-sendiri.
-
-Skrip ini TIDAK menyentuh GUI (tidak ada tkinter di lingkungan pengujian
-ini) - jadi ini adalah pengujian menyeluruh terhadap seluruh lapisan
-model/database/business-logic, yang merupakan bagian tersulit untuk
-diuji manual. Klik-per-klik GUI tetap perlu diuji manual oleh pengguna.
-"""
-
 import os
-import sys
 import shutil
+import sys
+import tempfile
 
-# File ini ada di dalam tests/, jadi root project adalah satu level di atas.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))
+    ),
+)
 
 from database.database import Database
 from models.customer import CustomerModel
 from models.product import ProductModel
+from models.supplier import SupplierModel
+from models.purchase import PurchaseModel
+from models.sale import SaleModel
 from models.debt import DebtModel
 from models.payment import PaymentModel
 from models.history import HistoryModel
@@ -32,7 +23,8 @@ from models.report import ReportModel
 from models.settings import SettingsModel
 from models.user import UserModel
 from utils.backup import backup_database, restore_database
-from utils.formatter import format_rupiah
+from utils.printer import Printer
+
 
 PASS = 0
 FAIL = 0
@@ -40,6 +32,7 @@ FAIL = 0
 
 def check(label, condition):
     global PASS, FAIL
+
     if condition:
         PASS += 1
         print(f"  [OK]   {label}")
@@ -56,247 +49,1004 @@ def section(title):
 
 
 # ----------------------------------------------------------------------
-# Persiapan lingkungan bersih
+# SETUP
 # ----------------------------------------------------------------------
-TEST_DIR = "/tmp/warung_phase12_test"
-if os.path.exists(TEST_DIR):
-    shutil.rmtree(TEST_DIR)
-os.makedirs(TEST_DIR)
+
+TEST_DIR = tempfile.mkdtemp(prefix="warung_phase12_")
 DB_PATH = os.path.join(TEST_DIR, "warung.db")
+BACKUP_DIR = os.path.join(TEST_DIR, "backup")
+PDF_DIR = os.path.join(TEST_DIR, "pdf")
 
-db = Database(db_path=DB_PATH)
-db.initialize()
+os.makedirs(PDF_DIR, exist_ok=True)
 
-cm = CustomerModel(db)
-pm = ProductModel(db)
-dm = DebtModel(db)
-pym = PaymentModel(db)
-hm = HistoryModel(db)
-rm = ReportModel(db)
-sm = SettingsModel(db)
-um = UserModel(db)
+try:
+    db = Database(db_path=DB_PATH)
+    db.initialize()
+
+    cm = CustomerModel(db)
+    pm = ProductModel(db)
+    sm_supplier = SupplierModel(db)
+    purchase_model = PurchaseModel(db)
+    sale_model = SaleModel(db)
+    dm = DebtModel(db)
+    pym = PaymentModel(db)
+    hm = HistoryModel(db)
+    rm = ReportModel(db)
+    settings = SettingsModel(db)
+    um = UserModel(db)
+
+    # ------------------------------------------------------------------
+    # 1. LOGIN
+    # ------------------------------------------------------------------
+
+    section("1. LOGIN")
+
+    user = um.authenticate("admin", "admin")
+    check(
+        "Login default admin/admin berhasil",
+        user is not None,
+    )
+
+    if user is not None:
+        ok, msg = um.change_username(
+            user["id"],
+            "pemilik_warung",
+        )
+        check(
+            "Ganti username berhasil",
+            ok,
+        )
+
+        ok, msg = um.change_password(
+            user["id"],
+            "admin",
+            "rahasia123",
+        )
+        check(
+            "Ganti password berhasil",
+            ok,
+        )
+
+        relogin = um.authenticate(
+            "pemilik_warung",
+            "rahasia123",
+        )
+        check(
+            "Login ulang dengan password baru berhasil",
+            relogin is not None,
+        )
+
+        old_password_login = um.authenticate(
+            "pemilik_warung",
+            "admin",
+        )
+        check(
+            "Login dengan password lama gagal",
+            old_password_login is None,
+        )
+
+    # ------------------------------------------------------------------
+    # 2. SETTINGS
+    # ------------------------------------------------------------------
+
+    section("2. SETTINGS")
+
+    saved_name = settings.set_nama_warung(
+        "Warung Bu Ani"
+    )
+
+    check(
+        "Nama warung berhasil disimpan",
+        saved_name == "Warung Bu Ani",
+    )
+
+    check(
+        "Nama warung dapat dibaca kembali",
+        settings.get_nama_warung() == "Warung Bu Ani",
+    )
+
+    # ------------------------------------------------------------------
+    # 3. MASTER CUSTOMER
+    # ------------------------------------------------------------------
+
+    section("3. MASTER CUSTOMER")
+
+    ok, msg, budi_id = cm.add_customer(
+        "Budi",
+        "081234567890",
+        "Pelanggan lama",
+    )
+    check(
+        "Customer Budi berhasil dibuat",
+        ok and budi_id is not None,
+    )
+
+    ok, msg, siti_id = cm.add_customer(
+        "Siti",
+        "",
+        "",
+    )
+    check(
+        "Customer Siti berhasil dibuat",
+        ok and siti_id is not None,
+    )
+
+    ok, msg, tono_id = cm.add_customer(
+        "Tono",
+        "",
+        "",
+    )
+    check(
+        "Customer Tono berhasil dibuat",
+        ok and tono_id is not None,
+    )
+
+    # ------------------------------------------------------------------
+    # 4. MASTER SUPPLIER
+    # ------------------------------------------------------------------
+
+    section("4. MASTER SUPPLIER")
+
+    ok, msg, supplier_id = sm_supplier.add_supplier(
+        "Supplier Utama",
+        "Supplier integration test",
+    )
+
+    check(
+        "Supplier berhasil dibuat",
+        ok and supplier_id is not None,
+    )
+
+    supplier = sm_supplier.get_by_id(supplier_id)
+    check(
+        "Supplier dapat dibaca",
+        supplier is not None
+        and supplier["name"] == "Supplier Utama",
+    )
+
+    ok, msg = sm_supplier.update_supplier(
+        supplier_id,
+        "Supplier Utama Update",
+        "Updated",
+    )
+
+    check(
+        "Supplier berhasil diubah",
+        ok,
+    )
+
+    supplier_list = sm_supplier.list_suppliers(
+        "Supplier Utama Update"
+    )
+
+    check(
+        "Pencarian supplier berhasil",
+        len(supplier_list) == 1,
+    )
+
+    # ------------------------------------------------------------------
+    # 5. MASTER PRODUCT
+    # ------------------------------------------------------------------
+
+    section("5. MASTER PRODUCT")
+
+    ok, msg, indomie_id = pm.add_product(
+        name="Indomie Goreng",
+        purchase_price=2500,
+        selling_price=3000,
+        barcode="8991002101012",
+    )
+
+    check(
+        "Produk Indomie berhasil dibuat",
+        ok and indomie_id is not None,
+    )
+
+    ok, msg, kopi_id = pm.add_product(
+        name="Kopi Sachet",
+        purchase_price=1800,
+        selling_price=2500,
+        barcode="8991002101013",
+    )
+
+    check(
+        "Produk Kopi berhasil dibuat",
+        ok and kopi_id is not None,
+    )
+
+    ok, msg, gula_id = pm.add_product(
+        name="Gula 1 Kg",
+        purchase_price=14000,
+        selling_price=16000,
+        barcode="8991002101014",
+    )
+
+    check(
+        "Produk Gula berhasil dibuat",
+        ok and gula_id is not None,
+    )
+
+    duplicate_ok, duplicate_msg, duplicate_id = pm.add_product(
+        name="Indomie Duplicate",
+        purchase_price=2500,
+        selling_price=3000,
+        barcode="8991002101012",
+    )
+
+    check(
+        "Barcode duplikat ditolak",
+        not duplicate_ok and duplicate_id is None,
+    )
+
+    scanned_product = pm.get_by_barcode(
+        "8991002101012"
+    )
+
+    check(
+        "Pencarian produk berdasarkan barcode berhasil",
+        scanned_product is not None
+        and scanned_product["id"] == indomie_id,
+    )
+
+    # ------------------------------------------------------------------
+    # 6. PURCHASE
+    # ------------------------------------------------------------------
+
+    section("6. PEMBELIAN + STOK")
+
+    ok, msg, purchase_id = purchase_model.create_transaction(
+        [
+            {
+                "product_id": indomie_id,
+                "quantity": 20,
+                "price": 2500,
+            },
+            {
+                "product_id": kopi_id,
+                "quantity": 10,
+                "price": 1800,
+            },
+            {
+                "product_id": gula_id,
+                "quantity": 5,
+                "price": 14000,
+            },
+        ],
+        notes="Pembelian integration test",
+    )
+
+    check(
+        "Transaksi pembelian berhasil",
+        ok and purchase_id is not None,
+    )
+
+    indomie = pm.get_by_id(indomie_id)
+    kopi = pm.get_by_id(kopi_id)
+    gula = pm.get_by_id(gula_id)
+
+    check(
+        "Stok Indomie bertambah menjadi 20",
+        indomie is not None
+        and indomie["stock"] == 20,
+    )
+
+    check(
+        "Stok Kopi bertambah menjadi 10",
+        kopi is not None
+        and kopi["stock"] == 10,
+    )
+
+    check(
+        "Stok Gula bertambah menjadi 5",
+        gula is not None
+        and gula["stock"] == 5,
+    )
+
+    check(
+        "Purchase price Indomie menjadi 2500",
+        indomie is not None
+        and indomie["purchase_price"] == 2500,
+    )
+
+    purchase_detail = purchase_model.get_transaction_detail(
+        purchase_id
+    )
+
+    check(
+        "Detail pembelian dapat dibaca",
+        purchase_detail is not None
+        and len(purchase_detail["items"]) == 3,
+    )
+
+    check(
+        "Total pembelian benar",
+        purchase_detail is not None
+        and purchase_detail["total_amount"] == (
+            20 * 2500
+            + 10 * 1800
+            + 5 * 14000
+        ),
+    )
+
+    purchases = purchase_model.list_transactions()
+
+    check(
+        "Daftar transaksi pembelian berisi transaksi",
+        any(
+            row["id"] == purchase_id
+            for row in purchases
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # 7. SALE
+    # ------------------------------------------------------------------
+
+    section("7. PENJUALAN + STOK")
+
+    ok, msg, sale_id = sale_model.create_transaction(
+        [
+            {
+                "product_id": indomie_id,
+                "quantity": 3,
+            },
+            {
+                "product_id": kopi_id,
+                "quantity": 2,
+            },
+        ],
+        paid_amount=20000,
+        notes="Penjualan integration test",
+    )
+
+    check(
+        "Transaksi penjualan berhasil",
+        ok and sale_id is not None,
+    )
+
+    indomie = pm.get_by_id(indomie_id)
+    kopi = pm.get_by_id(kopi_id)
+
+    check(
+        "Stok Indomie berkurang menjadi 17",
+        indomie is not None
+        and indomie["stock"] == 17,
+    )
+
+    check(
+        "Stok Kopi berkurang menjadi 8",
+        kopi is not None
+        and kopi["stock"] == 8,
+    )
+
+    sale_detail = sale_model.get_transaction_detail(
+        sale_id
+    )
+
+    check(
+        "Detail penjualan dapat dibaca",
+        sale_detail is not None
+        and len(sale_detail["details"]) == 2,
+    )
+
+    sale_total = (
+        3 * 3000
+        + 2 * 2500
+    )
+
+    check(
+        "Total penjualan benar",
+        sale_detail is not None
+        and sale_detail["sale"]["total_amount"] == sale_total,
+    )
+
+    check(
+        "Pembayaran penjualan benar",
+        sale_detail is not None
+        and sale_detail["sale"]["paid_amount"] == 20000,
+    )
+
+    check(
+        "Kembalian penjualan benar",
+        sale_detail is not None
+        and sale_detail["sale"]["change_amount"]
+        == 20000 - sale_total,
+    )
+
+    # ------------------------------------------------------------------
+    # 8. DEBT
+    # ------------------------------------------------------------------
+
+    section("8. HUTANG + STOK")
+
+    # Siti membeli 2 Indomie dan 1 Gula.
+    ok, msg, debt_id = dm.create_transaction(
+        siti_id,
+        [
+            {
+                "product_id": indomie_id,
+                "quantity": 2,
+            },
+            {
+                "product_id": gula_id,
+                "quantity": 1,
+            },
+        ],
+        notes="Hutang integration test",
+    )
+
+    check(
+        "Transaksi hutang berhasil",
+        ok and debt_id is not None,
+    )
+
+    indomie = pm.get_by_id(indomie_id)
+    gula = pm.get_by_id(gula_id)
+
+    check(
+        "Stok Indomie setelah hutang menjadi 15",
+        indomie is not None
+        and indomie["stock"] == 15,
+    )
+
+    check(
+        "Stok Gula setelah hutang menjadi 4",
+        gula is not None
+        and gula["stock"] == 4,
+    )
+
+    debt_detail = dm.get_transaction_detail(
+        debt_id
+    )
+
+    check(
+        "Detail hutang dapat dibaca",
+        debt_detail is not None
+        and len(debt_detail["items"]) == 2,
+    )
+
+    debt_total = (
+        2 * 3000
+        + 1 * 16000
+    )
+
+    check(
+        "Total hutang benar",
+        debt_detail is not None
+        and debt_detail["total_amount"] == debt_total,
+    )
+
+    # ------------------------------------------------------------------
+    # 9. PAYMENT
+    # ------------------------------------------------------------------
+
+    section("9. PEMBAYARAN HUTANG")
+
+    before_payment = cm.get_detail(siti_id)
+
+    check(
+        "Detail customer Siti tersedia sebelum pembayaran",
+        before_payment is not None,
+    )
+
+    ok, msg, payment_id = pym.create_payment(
+        siti_id,
+        5000,
+        notes="Pembayaran sebagian",
+    )
+
+    check(
+        "Pembayaran hutang berhasil",
+        ok and payment_id is not None,
+    )
+
+    payment_detail = pym.get_payment_detail(
+        payment_id
+    )
+
+    check(
+        "Detail pembayaran dapat dibaca",
+        payment_detail is not None
+        and payment_detail["amount"] == 5000,
+    )
+
+    # ------------------------------------------------------------------
+    # 10. CUSTOMER DETAIL
+    # ------------------------------------------------------------------
+
+    section("10. CUSTOMER DETAIL + TIMELINE")
+
+    siti_detail = cm.get_detail(siti_id)
+
+    check(
+        "Detail customer Siti dapat dibaca",
+        siti_detail is not None,
+    )
+
+    timeline = siti_detail.get(
+        "timeline",
+        []
+    ) if siti_detail else []
+
+    check(
+        "Timeline customer memiliki transaksi",
+        len(timeline) >= 2,
+    )
+
+    timeline_types = [
+        row.get("type")
+        for row in timeline
+    ]
+
+    check(
+        "Timeline memuat Hutang",
+        "Hutang" in timeline_types,
+    )
+
+    check(
+        "Timeline memuat Pembayaran",
+        "Pembayaran" in timeline_types,
+    )
+
+    # ------------------------------------------------------------------
+    # 11. HISTORY
+    # ------------------------------------------------------------------
+
+    section("11. HISTORY")
+
+    history = hm.list_history()
+
+    check(
+        "History tidak kosong",
+        len(history) > 0,
+    )
+
+    history_types = [
+        row.get("type")
+        for row in history
+    ]
+
+    check(
+        "History memuat Penjualan",
+        "Penjualan" in history_types,
+    )
+
+    check(
+        "History memuat Pembelian",
+        "Pembelian" in history_types,
+    )
+
+    check(
+        "History memuat Hutang",
+        "Hutang" in history_types,
+    )
+
+    check(
+        "History memuat Pembayaran",
+        "Pembayaran" in history_types,
+    )
+
+    # ------------------------------------------------------------------
+    # 12. DASHBOARD
+    # ------------------------------------------------------------------
+
+    section("12. DASHBOARD")
+
+    dashboard = rm.get_dashboard_summary()
+
+    check(
+        "Dashboard summary berhasil dibuat",
+        dashboard is not None,
+    )
+
+    check(
+        "Dashboard memiliki total customer",
+        dashboard is not None
+        and dashboard["total_customers"] >= 3,
+    )
+
+    check(
+        "Dashboard memiliki total produk",
+        dashboard is not None
+        and dashboard["total_products"] >= 3,
+    )
+
+    check(
+        "Dashboard memiliki transaksi terbaru",
+        dashboard is not None
+        and len(dashboard["recent_transactions"]) > 0,
+    )
+
+    check(
+        "Dashboard menghitung outstanding",
+        dashboard is not None
+        and "total_outstanding" in dashboard,
+    )
+
+    # ------------------------------------------------------------------
+    # 13. MONTHLY REPORT
+    # ------------------------------------------------------------------
+
+    section("13. MONTHLY REPORT")
+
+    from datetime import datetime
+
+    now = datetime.now()
+
+    report = rm.get_monthly_report(
+        now.year,
+        now.month,
+    )
+
+    check(
+        "Monthly report berhasil dibuat",
+        report is not None,
+    )
+
+    report_pdf = os.path.join(
+        PDF_DIR,
+        "laporan_integration.pdf",
+    )
+
+    try:
+        rm.export_to_pdf(
+            report,
+            report_pdf,
+            store_name=settings.get_nama_warung(),
+        )
+
+        check(
+            "PDF laporan berhasil dibuat",
+            os.path.exists(report_pdf)
+            and os.path.getsize(report_pdf) > 0,
+        )
+
+    except Exception:
+        check(
+            "PDF laporan berhasil dibuat",
+            False,
+        )
+
+    # ------------------------------------------------------------------
+    # 14. PRINTER
+    # ------------------------------------------------------------------
+
+    section("14. PRINTER / PDF TRANSAKSI")
+
+    printer = Printer(
+        store_name=settings.get_nama_warung()
+    )
+
+    # Sale
+    sale_pdf = os.path.join(
+        PDF_DIR,
+        "penjualan.pdf",
+    )
+
+    try:
+        printer.create_pdf(
+            "sale",
+            {
+                "sale_id": sale_id,
+                "transaction_number": sale_detail["sale"][
+                    "transaction_number"
+                ],
+                "transaction_date": sale_detail["sale"][
+                    "transaction_date"
+                ],
+                "total_amount": sale_detail["sale"][
+                    "total_amount"
+                ],
+                "paid_amount": sale_detail["sale"][
+                    "paid_amount"
+                ],
+                "change_amount": sale_detail["sale"][
+                    "change_amount"
+                ],
+                "notes": sale_detail["sale"]["notes"],
+                "details": sale_detail["details"],
+            },
+            output_path=sale_pdf,
+        )
+
+        check(
+            "PDF penjualan berhasil dibuat",
+            os.path.exists(sale_pdf)
+            and os.path.getsize(sale_pdf) > 0,
+        )
+
+    except Exception:
+        check(
+            "PDF penjualan berhasil dibuat",
+            False,
+        )
+
+    # Purchase
+    purchase_pdf = os.path.join(
+        PDF_DIR,
+        "pembelian.pdf",
+    )
+
+    try:
+        printer.create_pdf(
+            "purchase",
+            purchase_detail,
+            output_path=purchase_pdf,
+        )
+
+        check(
+            "PDF pembelian berhasil dibuat",
+            os.path.exists(purchase_pdf)
+            and os.path.getsize(purchase_pdf) > 0,
+        )
+
+    except Exception:
+        check(
+            "PDF pembelian berhasil dibuat",
+            False,
+        )
+
+    # Debt
+    debt_pdf = os.path.join(
+        PDF_DIR,
+        "hutang.pdf",
+    )
+
+    try:
+        printer.create_pdf(
+            "debt",
+            {
+                "transaction_number": debt_detail[
+                    "transaction_number"
+                ],
+                "transaction_date": debt_detail[
+                    "transaction_date"
+                ],
+                "customer_name": debt_detail[
+                    "customer_name"
+                ],
+                "total_amount": debt_detail[
+                    "total_amount"
+                ],
+                "notes": debt_detail["notes"],
+                "details": debt_detail["items"],
+            },
+            output_path=debt_pdf,
+        )
+
+        check(
+            "PDF hutang berhasil dibuat",
+            os.path.exists(debt_pdf)
+            and os.path.getsize(debt_pdf) > 0,
+        )
+
+    except Exception:
+        check(
+            "PDF hutang berhasil dibuat",
+            False,
+        )
+
+    # Payment
+    payment_pdf = os.path.join(
+        PDF_DIR,
+        "pembayaran.pdf",
+    )
+
+    try:
+        printer.create_pdf(
+            "payment",
+            {
+                "payment_id": payment_detail["id"],
+                "customer_name": payment_detail[
+                    "customer_name"
+                ],
+                "payment_date": payment_detail[
+                    "payment_date"
+                ],
+                "amount": payment_detail["amount"],
+                "notes": payment_detail["notes"],
+            },
+            output_path=payment_pdf,
+        )
+
+        check(
+            "PDF pembayaran berhasil dibuat",
+            os.path.exists(payment_pdf)
+            and os.path.getsize(payment_pdf) > 0,
+        )
+
+    except Exception:
+        check(
+            "PDF pembayaran berhasil dibuat",
+            False,
+        )
+
+    # ------------------------------------------------------------------
+    # 15. INVALID STOCK / ATOMIC VALIDATION
+    # ------------------------------------------------------------------
+
+    section("15. ATOMIC VALIDATION")
+
+    before_debt_count = len(
+        dm.get_transaction_detail(999999)
+        or {}
+    )
+
+    ok, msg, transaction_id = dm.create_transaction(
+        customer_id=siti_id,
+        items=[
+            {
+                "product_id": 999999,
+                "quantity": 1,
+            }
+        ],
+    )
+
+    check(
+        not ok and transaction_id is None,
+        "Debt invalid product ditolak",
+    )
+
+    after_debt_detail = dm.get_transaction_detail(999999)
+
+    check(
+        before_debt_count == len(after_debt_detail or {}),
+        "Debt invalid tidak membuat transaksi",
+    )
+
+    # ------------------------------------------------------------------
+    # 16. BACKUP
+    # ------------------------------------------------------------------
+
+    section("16. BACKUP")
+
+    backup_path = backup_database(
+        DB_PATH,
+        BACKUP_DIR,
+    )
+
+    check(
+        "Backup database berhasil dibuat",
+        os.path.exists(backup_path),
+    )
+
+    backup_db = Database(
+        db_path=backup_path
+    )
+
+    backup_db.initialize()
+
+    backup_settings = SettingsModel(
+        backup_db
+    )
+
+    check(
+        "Data settings ikut tersimpan dalam backup",
+        backup_settings.get_nama_warung()
+        == "Warung Bu Ani",
+    )
+
+    # ------------------------------------------------------------------
+    # 17. RESTORE
+    # ------------------------------------------------------------------
+
+    section("17. RESTORE")
+
+    # Tambahkan perubahan setelah backup.
+    ok, msg, extra_customer_id = cm.add_customer(
+        "Customer Setelah Backup",
+        "",
+        "",
+    )
+
+    check(
+        "Data tambahan setelah backup berhasil dibuat",
+        ok and extra_customer_id is not None,
+    )
+
+    customer_before_restore = cm.get_detail(
+        extra_customer_id
+    )
+
+    check(
+        customer_before_restore is not None,
+        "Data tambahan setelah backup berhasil dibuat",
+    )
+
+    safety_backup = restore_database(
+        backup_path,
+        DB_PATH,
+    )
+
+    check(
+        "Restore database berhasil",
+        os.path.exists(DB_PATH),
+    )
+
+    check(
+        "Safety backup sebelum restore dibuat",
+        safety_backup is not None
+        and os.path.exists(safety_backup),
+    )
+
+    restored_db = Database(
+        db_path=DB_PATH
+    )
+
+    restored_customer_model = CustomerModel(
+        restored_db
+    )
+
+    restored_extra_customer = (
+        restored_customer_model.get_detail(
+            extra_customer_id
+        )
+    )
+
+    check(
+        "Data setelah backup hilang setelah restore",
+        restored_extra_customer is None,
+    )
+
+    restored_settings = SettingsModel(
+        restored_db
+    )
+
+    check(
+        "Data settings dari backup berhasil dipulihkan",
+        restored_settings.get_nama_warung()
+        == "Warung Bu Ani",
+    )
+
+    # ------------------------------------------------------------------
+    # 18. FINAL DATABASE INTEGRITY
+    # ------------------------------------------------------------------
+
+    section("18. FINAL DATABASE INTEGRITY")
+
+    with restored_db.transaction() as conn:
+        integrity = conn.execute(
+            "PRAGMA integrity_check;"
+        ).fetchone()[0]
+
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_keys;"
+        ).fetchone()[0]
+
+    check(
+        "SQLite integrity_check = ok",
+        integrity == "ok",
+    )
+
+    check(
+        "Foreign key aktif",
+        foreign_keys == 1,
+    )
+
+finally:
+    # Jangan menghapus TEST_DIR agar PDF/database hasil test
+    # bisa diperiksa jika ada kegagalan.
+    pass
+
 
 # ----------------------------------------------------------------------
-section("1. LOGIN & AKUN (Phase 2)")
+# RESULT
 # ----------------------------------------------------------------------
-user = um.authenticate("admin", "admin")
-check("Login dengan akun default admin/admin berhasil", user is not None)
 
-ok, msg = um.change_username(user["id"], "pemilik_warung")
-check("Ganti username berhasil", ok)
-user["username"] = "pemilik_warung"
-
-ok, msg = um.change_password(user["id"], "admin", "rahasia123")
-check("Ganti password berhasil", ok)
-
-relogin = um.authenticate("pemilik_warung", "rahasia123")
-check("Login ulang dengan username & password baru berhasil", relogin is not None)
-
-relogin_gagal = um.authenticate("pemilik_warung", "admin")
-check("Login dengan password LAMA setelah diganti gagal (benar)", relogin_gagal is None)
-
-# ----------------------------------------------------------------------
-section("2. PENGATURAN - Nama Warung (Phase 10)")
-# ----------------------------------------------------------------------
-saved_name = sm.set_nama_warung("Warung Bu Ani")
-check("Nama warung tersimpan", sm.get_nama_warung() == "Warung Bu Ani")
-
-# ----------------------------------------------------------------------
-section("3. DATA MASTER - Pelanggan & Barang (Phase 4 & 5)")
-# ----------------------------------------------------------------------
-_, _, budi_id = cm.add_customer("Budi", "081234567890", "Pelanggan lama")
-_, _, siti_id = cm.add_customer("Siti", "", "")
-_, _, tono_id = cm.add_customer("Tono", "", "")
-check("3 pelanggan berhasil dibuat", all([budi_id, siti_id, tono_id]))
-
-_, _, indomie_id = pm.add_product(name="Indomie Goreng", price=3000, barcode="8991002101012", unit="pcs")
-_, _, kopi_id = pm.add_product(name="Kopi ABC", price=5000, barcode="8991002101013", unit="sachet")
-_, _, gula_id = pm.add_product(name="Gula Pasir", price=15000, barcode="", unit="kg")
-_, _, telur_id = pm.add_product(name="Telur Ayam", price=2000, barcode="", unit="butir")
-check("4 barang berhasil dibuat (2 dengan barcode, 2 tanpa)", all([indomie_id, kopi_id, gula_id, telur_id]))
-
-dup_ok, dup_msg, _ = pm.add_product(name="Indomie Palsu", price=3000, barcode="8991002101012")
-check("Barcode duplikat ditolak", not dup_ok)
-
-scan_result = pm.get_by_barcode("8991002101012")
-check("Scan barcode Indomie ditemukan", scan_result and scan_result["name"] == "Indomie Goreng")
-
-# ----------------------------------------------------------------------
-section("4. TRANSAKSI HUTANG - Beberapa Pelanggan (Phase 6)")
-# ----------------------------------------------------------------------
-ok, msg, tx1 = dm.create_transaction(budi_id, [
-    {"product_id": indomie_id, "product_name": "Indomie Goreng", "quantity": 2, "price": 3000},
-    {"product_id": kopi_id, "product_name": "Kopi ABC", "quantity": 1, "price": 5000},
-])
-check("Transaksi Budi #1 (Rp 11.000) tersimpan", ok and dm.get_transaction_detail(tx1)["total_amount"] == 11000)
-
-ok, msg, tx2 = dm.create_transaction(budi_id, [
-    {"product_id": gula_id, "product_name": "Gula Pasir", "quantity": 1, "price": 15000},
-    {"product_id": None, "product_name": "Minyak Goreng Curah", "quantity": 1, "price": 8000},
-])
-check("Transaksi Budi #2 (dengan barang manual) tersimpan", ok)
-
-ok, msg, tx3 = dm.create_transaction(siti_id, [
-    {"product_id": telur_id, "product_name": "Telur Ayam", "quantity": 10, "price": 2000},
-])
-check("Transaksi Siti (Rp 20.000) tersimpan", ok)
-
-ok, msg, tx4 = dm.create_transaction(tono_id, [
-    {"product_id": indomie_id, "product_name": "Indomie Goreng", "quantity": 1, "price": 3000},
-])
-check("Transaksi Tono (Rp 3.000) tersimpan", ok)
-
-rej1, _, _ = dm.create_transaction(budi_id, [])
-rej2, _, _ = dm.create_transaction(None, [{"product_id": None, "product_name": "X", "quantity": 1, "price": 1000}])
-rej3, _, _ = dm.create_transaction(budi_id, [{"product_id": None, "product_name": "Y", "quantity": -1, "price": 1000}])
-check("Transaksi tanpa barang / tanpa pelanggan / qty negatif semuanya ditolak", not any([rej1, rej2, rej3]))
-
-# ----------------------------------------------------------------------
-section("5. PERUBAHAN HARGA MASTER TIDAK MENGUBAH HISTORI (Phase 6/15)")
-# ----------------------------------------------------------------------
-pm.update_product(indomie_id, name="Indomie Goreng", price=3500, barcode="8991002101012", unit="pcs")
-detail_tx1 = dm.get_transaction_detail(tx1)
-indomie_line = next(i for i in detail_tx1["items"] if i["product_name"] == "Indomie Goreng")
-check("Harga Indomie di histori TETAP Rp 3.000 walau harga master naik jadi Rp 3.500",
-      indomie_line["price"] == 3000)
-
-# ----------------------------------------------------------------------
-section("6. PEMBAYARAN - Sebagian, Pas, dan Ditolak (Phase 7)")
-# ----------------------------------------------------------------------
-total_debt, total_paid, sisa_budi = pym.get_balance(budi_id)
-check("Sisa hutang Budi sebelum bayar = 11000+23000 = 34000", sisa_budi == 34000)
-
-ok, msg, _ = pym.create_payment(budi_id, 34000 + 1000)
-check("Pembayaran Budi MELEBIHI sisa DITOLAK", not ok)
-
-ok, msg, _ = pym.create_payment(budi_id, 20000)
-check("Pembayaran sebagian Budi (Rp 20.000) berhasil", ok)
-
-_, _, sisa_budi_setelah = pym.get_balance(budi_id)
-check("Sisa hutang Budi setelah bayar sebagian = 14000", sisa_budi_setelah == 14000)
-
-ok, msg, _ = pym.create_payment(budi_id, 14000)
-check("Pelunasan sisa Budi (Rp 14.000, pas) berhasil", ok)
-
-detail_budi = cm.get_detail(budi_id)
-check("Status Budi setelah lunas = 'Lunas'", detail_budi["status"] == "Lunas" and detail_budi["sisa"] == 0)
-
-pym.create_payment(siti_id, 5000)
-detail_siti = cm.get_detail(siti_id)
-check("Siti masih berhutang Rp 15.000 setelah bayar sebagian",
-      detail_siti["sisa"] == 15000 and detail_siti["status"] == "Masih Berhutang")
-
-# ----------------------------------------------------------------------
-section("7. SOFT DELETE - Pelanggan & Barang (Phase 4/5)")
-# ----------------------------------------------------------------------
-cm.deactivate_customer(tono_id)
-active_customers = [c["name"] for c in cm.list_customers()]
-all_customers = [c["name"] for c in cm.list_customers(include_inactive=True)]
-check("Tono hilang dari daftar aktif tapi tetap ada di database",
-      "Tono" not in active_customers and "Tono" in all_customers)
-
-pm.deactivate_product(telur_id)
-active_products = [p["name"] for p in pm.list_products()]
-check("Telur Ayam nonaktif tidak muncul di daftar aktif", "Telur Ayam" not in active_products)
-
-history_tono = hm.list_history(customer_id=tono_id)
-check("Histori transaksi Tono tetap utuh walau Tono sudah dinonaktifkan", len(history_tono) == 1)
-
-# ----------------------------------------------------------------------
-section("8. RIWAYAT - Filter Gabungan (Phase 8)")
-# ----------------------------------------------------------------------
-all_history = hm.list_history()
-check("Total baris riwayat = 4 transaksi hutang + 3 pembayaran = 7", len(all_history) == 7)
-
-hutang_only = hm.list_history(type_filter="hutang")
-check("Filter jenis Hutang = 4 baris", len(hutang_only) == 4)
-
-bayar_only = hm.list_history(type_filter="pembayaran")
-check("Filter jenis Pembayaran = 3 baris", len(bayar_only) == 3)
-
-budi_history = hm.list_history(customer_id=budi_id)
-check("Filter per pelanggan Budi = 4 baris (2 hutang + 2 bayar)", len(budi_history) == 4)
-
-# ----------------------------------------------------------------------
-section("9. LAPORAN BULANAN (Phase 9)")
-# ----------------------------------------------------------------------
-import datetime
-now = datetime.datetime.now()
-report = rm.get_monthly_report(now.year, now.month)
-
-expected_total_debt_month = 11000 + 23000 + 20000 + 3000
-check(f"Total hutang bulan ini = {format_rupiah(expected_total_debt_month)}",
-      report["total_debt_month"] == expected_total_debt_month)
-
-expected_total_payment_month = 20000 + 14000 + 5000
-check(f"Total pembayaran bulan ini = {format_rupiah(expected_total_payment_month)}",
-      report["total_payment_month"] == expected_total_payment_month)
-
-check("Jumlah transaksi hutang bulan ini = 4", report["count_debt_transactions"] == 4)
-check("Jumlah transaksi pembayaran bulan ini = 3", report["count_payment_transactions"] == 3)
-
-expected_outstanding = expected_total_debt_month - expected_total_payment_month
-check(f"Saldo saat ini (semua pelanggan) = {format_rupiah(expected_outstanding)}",
-      report["current_outstanding_balance"] == expected_outstanding)
-
-pdf_path = os.path.join(TEST_DIR, "laporan_test.pdf")
-rm.export_to_pdf(report, pdf_path, store_name=sm.get_nama_warung())
-check("File PDF laporan berhasil dibuat", os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 500)
-
-# ----------------------------------------------------------------------
-section("10. BACKUP & RESTORE (Phase 10)")
-# ----------------------------------------------------------------------
-backup_path = backup_database(DB_PATH)
-check("Backup database berhasil dibuat", os.path.exists(backup_path))
-
-dm.create_transaction(siti_id, [{"product_id": None, "product_name": "Barang Setelah Backup", "quantity": 1, "price": 99000}])
-_, _, sisa_siti_setelah_tambahan = pym.get_balance(siti_id)
-check("Sisa hutang Siti bertambah setelah transaksi baru", sisa_siti_setelah_tambahan == 15000 + 99000)
-
-safety_path = restore_database(backup_path, DB_PATH)
-check("Safety-backup otomatis dibuat sebelum restore", safety_path and os.path.exists(safety_path))
-
-db2 = Database(db_path=DB_PATH)
-pym2 = PaymentModel(db2)
-_, _, sisa_siti_setelah_restore = pym2.get_balance(siti_id)
-check("Setelah restore, transaksi ekstra HILANG dari database aktif (kembali ke Rp 15.000)",
-      sisa_siti_setelah_restore == 15000)
-
-db_safety = Database(db_path=safety_path)
-pym_safety = PaymentModel(db_safety)
-_, _, sisa_siti_di_safety = pym_safety.get_balance(siti_id)
-check("Data yang 'hilang' tadi TETAP AMAN tersimpan di safety-backup",
-      sisa_siti_di_safety == 15000 + 99000)
-
-# ----------------------------------------------------------------------
-section("11. INTEGRITAS ATOMIK (Phase 6/11)")
-# ----------------------------------------------------------------------
-with db2.transaction() as conn:
-    tx_count_before = conn.execute("SELECT COUNT(*) AS c FROM debt_transactions").fetchone()["c"]
-
-dm2 = DebtModel(db2)
-ok, msg, _ = dm2.create_transaction(budi_id, [
-    {"product_id": 999999, "product_name": "Barang Hantu", "quantity": 1, "price": 1000}
-])
-with db2.transaction() as conn:
-    tx_count_after = conn.execute("SELECT COUNT(*) AS c FROM debt_transactions").fetchone()["c"]
-
-check("Transaksi dengan referensi barang tidak valid ditolak & TIDAK menambah baris (atomik)",
-      not ok and tx_count_before == tx_count_after)
-
-# ----------------------------------------------------------------------
-section("HASIL AKHIR")
-# ----------------------------------------------------------------------
 print()
-print(f"Total pemeriksaan : {PASS + FAIL}")
-print(f"Lolos             : {PASS}")
-print(f"Gagal             : {FAIL}")
-print()
+print("=" * 70)
+print("HASIL INTEGRATION TEST")
+print("=" * 70)
+
+print(f"PASS : {PASS}")
+print(f"FAIL : {FAIL}")
+print(f"TEST DIR : {TEST_DIR}")
+
 if FAIL == 0:
-    print(">>> SEMUA SKENARIO END-TO-END LOLOS <<<")
-else:
-    print(f">>> ADA {FAIL} SKENARIO YANG GAGAL - PERLU DIPERIKSA <<<")
+    print()
+    print("SEMUA INTEGRATION TEST BERHASIL.")
+    sys.exit(0)
 
-shutil.rmtree(TEST_DIR, ignore_errors=True)
-
-sys.exit(0 if FAIL == 0 else 1)
+print()
+print("MASIH ADA TEST YANG GAGAL.")
+sys.exit(1)

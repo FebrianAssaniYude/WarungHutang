@@ -1,195 +1,439 @@
-"""
-views/history.py
-
-Halaman Riwayat: menampilkan seluruh aktivitas (hutang + pembayaran)
-dalam satu tabel, dengan filter jenis (Semua/Hutang/Pembayaran),
-pelanggan (opsional), dan rentang tanggal (opsional).
-"""
-
 import re
+import time
 
 import customtkinter as ctk
 
+from components.cards import SectionCard
+from components.customer_picker import CustomerPickerDialog, CustomerSelector
+from components.detail_dialogs import (
+    DebtDetailDialog,
+    PaymentDetailDialog,
+    PurchaseDetailDialog,
+    SaleDetailDialog,
+)
+from components.dialogs import show_error, show_warning
+from components.forms import FormField, option_menu_style
+from components.page_header import PageHeader
+from components.tables import DataTable
 from models.customer import CustomerModel
+from models.debt import DebtModel
 from models.history import HistoryModel
-from utils.formatter import format_rupiah, format_date_indonesia
-from views.debts import CustomerPickerDialog
+from models.payment import PaymentModel
+from models.purchase import PurchaseModel
+from models.sale import SaleModel
+from utils.formatter import format_date_indonesia, format_rupiah
+from utils.theme import COLORS, LAYOUT, SPACING, button_style, get_font
 
-TYPE_OPTIONS = ["Semua", "Hutang", "Pembayaran"]
+TYPE_OPTIONS = [
+    "Semua",
+    "Hutang",
+    "Pembayaran",
+    "Pembelian",
+    "Penjualan",
+]
+
+ALL_CUSTOMERS = "Semua Pelanggan"
+
+# Treeview ringan, jadi satu halaman bisa memuat lebih banyak baris.
+PAGE_SIZE = 500
+
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Tidak ada kolom Aksi: baris dibuka dengan klik dua kali atau Enter.
+HISTORY_COLUMNS = [
+    {"title": "Tanggal", "weight": 2, "align": "left"},
+    {"title": "Pelanggan", "weight": 4, "align": "left"},
+    {"title": "Jenis", "weight": 2, "align": "left"},
+    {"title": "Nominal", "weight": 3, "align": "right"},
+]
+
+# Tanda nominal per jenis transaksi.
+SIGN_MAP = {
+    "Hutang": "+",
+    "Pembayaran": "-",
+    "Pembelian": "-",
+    "Penjualan": "+",
+}
+
+# Warna titik di kolom kiri tabel per jenis transaksi.
+# Sesuaikan dengan warna badge jenis transaksi di components/badges.py.
+TYPE_VARIANTS = {
+    "Hutang": "warning",
+    "Pembayaran": "success",
+    "Pembelian": "neutral",
+    "Penjualan": "info",
+}
+
+ACTIVATE_HINT = "Klik dua kali baris untuk melihat detail."
 
 
 class HistoryPage(ctk.CTkFrame):
-    def __init__(self, master, history_model: HistoryModel, customer_model: CustomerModel):
+    def __init__(
+        self,
+        master,
+        history_model: HistoryModel,
+        customer_model: CustomerModel,
+    ):
         super().__init__(master, fg_color="transparent")
 
         self.history_model = history_model
         self.customer_model = customer_model
-        self.selected_customer = None  # None = semua pelanggan
+        self.debt_model = DebtModel(customer_model.db)
+        self.payment_model = PaymentModel(customer_model.db)
+        self.purchase_model = PurchaseModel(customer_model.db)
+        self.sale_model = SaleModel(customer_model.db)
+        self.selected_customer = None
+        self._entries = []
+        self._shown = PAGE_SIZE
 
-        self._build_header()
-        self._build_filter_row()
-        self._build_table_header()
-        self._build_table_body()
+        # jenis -> (pemuat detail, kelas dialog, nama, pesan tidak ditemukan)
+        self._detail_sources = {
+            "Hutang": (
+                self.debt_model.get_transaction_detail,
+                DebtDetailDialog,
+                "hutang",
+                "Transaksi hutang tidak ditemukan.",
+            ),
+            "Pembayaran": (
+                self.payment_model.get_payment_detail,
+                PaymentDetailDialog,
+                "pembayaran",
+                "Data pembayaran tidak ditemukan.",
+            ),
+            "Pembelian": (
+                self.purchase_model.get_transaction_detail,
+                PurchaseDetailDialog,
+                "pembelian",
+                "Transaksi pembelian tidak ditemukan.",
+            ),
+            "Penjualan": (
+                self.sale_model.get_transaction_detail,
+                SaleDetailDialog,
+                "penjualan",
+                "Transaksi penjualan tidak ditemukan.",
+            ),
+        }
 
-        self.refresh()
+        self._build_ui()
+
+        # Tidak memanggil refresh() di sini: MainWindow.show_page() sudah
+        # memanggil refresh() setiap halaman dibuka, jadi memuat seluruh
+        # riwayat saat aplikasi start hanya memperlambat startup.
 
     # ------------------------------------------------------------------
-    # Header
+    # UI
     # ------------------------------------------------------------------
-    def _build_header(self):
+    def _build_ui(self):
+        page_padding = LAYOUT["page_padding"]
+
+        PageHeader(self, "Riwayat").pack(
+            fill="x",
+            padx=page_padding,
+            pady=LAYOUT["header_pady"],
+        )
+
+        card = SectionCard(self)
+        card.pack(
+            fill="both",
+            expand=True,
+            padx=page_padding,
+            pady=(0, page_padding),
+        )
+
+        self._build_filters(card.body)
+
+        # Footer dipasang sebelum tabel agar selalu terlihat di bawah.
+        self._build_footer(card.body)
+
+        self.table = DataTable(
+            card.body,
+            HISTORY_COLUMNS,
+            empty_title="Tidak ada riwayat",
+            empty_text="Tidak ada riwayat yang cocok dengan filter ini.",
+            on_activate=self._on_activate,
+            show_dot=True,
+        )
+        self.table.pack(fill="both", expand=True)
+
+    def _build_footer(self, parent):
+        self.footer = ctk.CTkFrame(
+            parent,
+            fg_color="transparent",
+            width=0,
+            height=0,
+        )
+        self.footer.pack(side="bottom", fill="x", pady=(SPACING["md"], 0))
+
+        self.count_label = ctk.CTkLabel(
+            self.footer,
+            text="",
+            font=get_font("small"),
+            text_color=COLORS["text_secondary"],
+            anchor="w",
+        )
+        self.count_label.pack(side="left")
+
+        self.more_button = ctk.CTkButton(
+            self.footer,
+            text="Tampilkan Lebih Banyak",
+            width=180,
+            command=self._show_more,
+            **button_style("secondary", "small"),
+        )
+
+    def _update_footer(self):
+        total = len(self._entries)
+        shown = min(self._shown, total)
+
+        self.count_label.configure(
+            text=(
+                f"Menampilkan {shown} dari {total} transaksi"
+                f"  •  {ACTIVATE_HINT}"
+                if total
+                else ""
+            )
+        )
+
+        if total > shown:
+            self.more_button.pack(side="right")
+        else:
+            self.more_button.pack_forget()
+
+    def _render(self):
+        started = time.perf_counter()
+
+        visible = self._entries[: self._shown]
+
+        self.table.set_rows(
+            [self._row_values(entry) for entry in visible],
+            variants=[
+                TYPE_VARIANTS.get(entry["type"], "neutral")
+                for entry in visible
+            ],
+        )
+        self._update_footer()
+
+        print(
+            f"[riwayat] render={time.perf_counter() - started:.3f}s "
+            f"baris={len(visible)}"
+        )
+
+    def _show_more(self):
+        self._shown += PAGE_SIZE
+        self._render()
+
+    @staticmethod
+    def _labeled_cell(parent, label: str):
+        cell = ctk.CTkFrame(
+            parent,
+            fg_color="transparent",
+            width=0,
+            height=0,
+        )
+
         ctk.CTkLabel(
-            self, text="Riwayat", font=ctk.CTkFont(size=24, weight="bold")
-        ).pack(anchor="w", padx=32, pady=(28, 12))
+            cell,
+            text=label,
+            font=get_font("button_small"),
+            text_color=COLORS["text"],
+            anchor="w",
+        ).pack(fill="x")
 
-    # ------------------------------------------------------------------
-    # Filter: jenis, pelanggan, rentang tanggal
-    # ------------------------------------------------------------------
-    def _build_filter_row(self):
-        row = ctk.CTkFrame(self, fg_color=("gray95", "gray20"))
-        row.pack(fill="x", padx=32, pady=(0, 12))
+        return cell
+
+    def _build_filters(self, parent):
+        bar = ctk.CTkFrame(
+            parent,
+            fg_color="transparent",
+            width=0,
+            height=0,
+        )
+        bar.pack(fill="x", pady=(0, SPACING["md"]))
+        bar.grid_columnconfigure(1, weight=1)
+
+        gap = SPACING["md"]
 
         # Jenis
-        ctk.CTkLabel(row, text="Jenis:", font=ctk.CTkFont(size=12, weight="bold")).pack(
-            side="left", padx=(16, 6), pady=12
-        )
+        type_cell = self._labeled_cell(bar, "Jenis")
+        type_cell.grid(row=0, column=0, sticky="sw", padx=(0, gap))
+
         self.type_var = ctk.StringVar(value="Semua")
-        type_menu = ctk.CTkOptionMenu(
-            row, values=TYPE_OPTIONS, variable=self.type_var,
-            width=130, command=lambda _: self.refresh(),
-        )
-        type_menu.pack(side="left", padx=(0, 16), pady=12)
+
+        ctk.CTkOptionMenu(
+            type_cell,
+            values=TYPE_OPTIONS,
+            variable=self.type_var,
+            width=140,
+            command=lambda _value: self.refresh(),
+            **option_menu_style(),
+        ).pack(fill="x", pady=(SPACING["xs"], 0))
 
         # Pelanggan
-        ctk.CTkLabel(row, text="Pelanggan:", font=ctk.CTkFont(size=12, weight="bold")).pack(
-            side="left", padx=(0, 6), pady=12
+        customer_cell = self._labeled_cell(bar, "Pelanggan")
+        customer_cell.grid(row=0, column=1, sticky="sew", padx=(0, gap))
+
+        customer_row = ctk.CTkFrame(
+            customer_cell,
+            fg_color="transparent",
+            width=0,
+            height=0,
         )
-        self.customer_button = ctk.CTkButton(
-            row, text="Semua Pelanggan", width=160, height=28,
-            fg_color="transparent", border_width=1, text_color=("gray10", "gray90"),
+        customer_row.pack(fill="x", pady=(SPACING["xs"], 0))
+
+        self.customer_button = CustomerSelector(
+            customer_row,
             command=self._open_customer_picker,
+            placeholder=ALL_CUSTOMERS,
         )
-        self.customer_button.pack(side="left", padx=(0, 6), pady=12)
+        self.customer_button.pack(side="left", fill="x", expand=True)
 
         ctk.CTkButton(
-            row, text="Reset", width=56, height=28,
-            fg_color="gray70", hover_color="gray60",
+            customer_row,
+            text="Reset",
+            width=72,
             command=self._reset_customer_filter,
-        ).pack(side="left", padx=(0, 16), pady=12)
+            **button_style("secondary"),
+        ).pack(side="left", padx=(SPACING["sm"], 0))
 
-        # Rentang tanggal
-        ctk.CTkLabel(row, text="Dari:", font=ctk.CTkFont(size=12, weight="bold")).pack(
-            side="left", padx=(0, 6), pady=12
+        # Tanggal
+        self.date_from_field = FormField(bar, "Dari", "YYYY-MM-DD")
+        self.date_from_field.grid(
+            row=0, column=2, sticky="sew", padx=(0, gap)
         )
-        self.date_from_entry = ctk.CTkEntry(row, width=110, placeholder_text="YYYY-MM-DD")
-        self.date_from_entry.pack(side="left", padx=(0, 12), pady=12)
-        self.date_from_entry.bind("<Return>", lambda e: self.refresh())
+        self.date_from_entry = self.date_from_field.entry
+        self.date_from_entry.bind("<Return>", lambda _e: self.refresh())
 
-        ctk.CTkLabel(row, text="Sampai:", font=ctk.CTkFont(size=12, weight="bold")).pack(
-            side="left", padx=(0, 6), pady=12
+        self.date_to_field = FormField(bar, "Sampai", "YYYY-MM-DD")
+        self.date_to_field.grid(
+            row=0, column=3, sticky="sew", padx=(0, gap)
         )
-        self.date_to_entry = ctk.CTkEntry(row, width=110, placeholder_text="YYYY-MM-DD")
-        self.date_to_entry.pack(side="left", padx=(0, 12), pady=12)
-        self.date_to_entry.bind("<Return>", lambda e: self.refresh())
+        self.date_to_entry = self.date_to_field.entry
+        self.date_to_entry.bind("<Return>", lambda _e: self.refresh())
 
-        ctk.CTkButton(row, text="Terapkan", height=28, command=self.refresh).pack(
-            side="left", padx=(0, 16), pady=12
-        )
+        ctk.CTkButton(
+            bar,
+            text="Terapkan",
+            width=100,
+            command=self.refresh,
+            **button_style("primary"),
+        ).grid(row=0, column=4, sticky="s")
 
+    # ------------------------------------------------------------------
+    # Filter pelanggan
+    # ------------------------------------------------------------------
     def _open_customer_picker(self):
-        CustomerPickerDialog(self, self.customer_model, on_select=self._handle_customer_selected)
+        CustomerPickerDialog(
+            self,
+            self.customer_model,
+            on_select=self._handle_customer_selected,
+        )
 
     def _handle_customer_selected(self, customer: dict):
         self.selected_customer = customer
-        self.customer_button.configure(text=f"{customer['name']}")
+        self.customer_button.set_customer(customer)
         self.refresh()
 
     def _reset_customer_filter(self):
         self.selected_customer = None
-        self.customer_button.configure(text="Semua Pelanggan")
+        self.customer_button.set_customer(None)
         self.refresh()
 
     # ------------------------------------------------------------------
-    # Tabel
+    # Refresh
     # ------------------------------------------------------------------
-    def _build_table_header(self):
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=32)
-
-        columns = [("Tanggal", 2), ("Pelanggan", 2), ("Jenis", 1), ("Nominal", 1)]
-        for col, (_, weight) in enumerate(columns):
-            row.grid_columnconfigure(col, weight=weight)
-        for col, (text, _) in enumerate(columns):
-            ctk.CTkLabel(
-                row, text=text, font=ctk.CTkFont(size=12, weight="bold"), text_color="gray50"
-            ).grid(row=0, column=col, sticky="w", padx=8, pady=(0, 6))
-
-    def _build_table_body(self):
-        self.table_frame = ctk.CTkScrollableFrame(self, fg_color=("white", "gray17"))
-        self.table_frame.pack(fill="both", expand=True, padx=32, pady=(0, 24))
-        for col, weight in [(0, 2), (1, 2), (2, 1), (3, 1)]:
-            self.table_frame.grid_columnconfigure(col, weight=weight)
-
     def refresh(self):
-        for widget in self.table_frame.winfo_children():
-            widget.destroy()
+        type_filter = self.type_var.get().strip().lower()
 
-        type_filter_map = {"Semua": "semua", "Hutang": "hutang", "Pembayaran": "pembayaran"}
-        type_filter = type_filter_map.get(self.type_var.get(), "semua")
+        customer_id = (
+            self.selected_customer["id"]
+            if self.selected_customer
+            else None
+        )
 
-        customer_id = self.selected_customer["id"] if self.selected_customer else None
         date_from = self.date_from_entry.get().strip() or None
         date_to = self.date_to_entry.get().strip() or None
 
-        for label, value in (("Dari", date_from), ("Sampai", date_to)):
+        for label, value in (
+            ("Dari", date_from),
+            ("Sampai", date_to),
+        ):
             if value and not _DATE_PATTERN.match(value):
-                ctk.CTkLabel(
-                    self.table_frame,
-                    text=f"Format tanggal \"{label}\" tidak valid. Gunakan format YYYY-MM-DD, contoh: 2026-09-11.",
-                    text_color="#D64545",
-                ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=16)
+                self._entries = []
+                self._update_footer()
+                self.table.set_error(
+                    "Format tanggal tidak valid",
+                    f'Format tanggal "{label}" tidak valid. '
+                    "Gunakan format YYYY-MM-DD, contoh: 2026-09-11.",
+                )
                 return
 
         try:
+            started = time.perf_counter()
             entries = self.history_model.list_history(
                 type_filter=type_filter,
                 customer_id=customer_id,
                 date_from=date_from,
                 date_to=date_to,
             )
+            print(
+                f"[riwayat] query={time.perf_counter() - started:.3f}s "
+                f"baris={len(entries)}"
+            )
         except Exception:
-            ctk.CTkLabel(
-                self.table_frame,
-                text="Terjadi kesalahan saat memuat riwayat. Coba lagi.",
-                text_color="#D64545",
-            ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=16)
+            self._entries = []
+            self._update_footer()
+            self.table.set_error(
+                "Gagal memuat riwayat",
+                "Terjadi kesalahan saat memuat riwayat. Coba lagi.",
+            )
             return
 
-        if not entries:
-            ctk.CTkLabel(
-                self.table_frame, text="Tidak ada riwayat yang cocok dengan filter ini.",
-                text_color="gray50",
-            ).grid(row=0, column=0, columnspan=4, sticky="w", padx=8, pady=16)
+        self._entries = list(entries)
+        self._shown = PAGE_SIZE
+        self._render()
+
+    # ------------------------------------------------------------------
+    # Row
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _row_values(entry: dict) -> list:
+        sign = SIGN_MAP.get(entry["type"], "")
+        amount_text = f"{sign} {format_rupiah(entry['amount'])}".strip()
+
+        return [
+            format_date_indonesia(entry["date"]),
+            entry.get("customer_name") or "-",
+            entry["type"],
+            amount_text,
+        ]
+
+    # ------------------------------------------------------------------
+    # Detail
+    # ------------------------------------------------------------------
+    def _on_activate(self, index: int):
+        if 0 <= index < len(self._entries):
+            self._open_detail(self._entries[index])
+
+    def _open_detail(self, entry: dict):
+        source = self._detail_sources.get(entry["type"])
+
+        if not source:
             return
 
-        for i, entry in enumerate(entries):
-            self._build_row(i, entry)
+        loader, dialog_class, name, not_found_text = source
 
-    def _build_row(self, row_index: int, entry: dict):
-        ctk.CTkLabel(
-            self.table_frame, text=format_date_indonesia(entry["date"]), anchor="w"
-        ).grid(row=row_index, column=0, sticky="ew", padx=8, pady=6)
+        try:
+            detail = loader(entry["transaction_id"])
+        except Exception:
+            show_error(
+                self,
+                "Terjadi Kesalahan",
+                f"Gagal memuat detail {name}. Coba lagi.",
+            )
+            return
 
-        ctk.CTkLabel(self.table_frame, text=entry["customer_name"], anchor="w").grid(
-            row=row_index, column=1, sticky="ew", padx=8, pady=6
-        )
+        if not detail:
+            show_warning(self, "Data Tidak Ditemukan", not_found_text)
+            return
 
-        color = "#B93A3A" if entry["type"] == "Hutang" else "#2E7D32"
-        ctk.CTkLabel(self.table_frame, text=entry["type"], anchor="w", text_color=color).grid(
-            row=row_index, column=2, sticky="ew", padx=8, pady=6
-        )
-
-        sign = "+" if entry["type"] == "Hutang" else "-"
-        ctk.CTkLabel(
-            self.table_frame, text=f"{sign} {format_rupiah(entry['amount'])}", anchor="w", text_color=color,
-        ).grid(row=row_index, column=3, sticky="ew", padx=8, pady=6)
+        dialog_class(self, detail)

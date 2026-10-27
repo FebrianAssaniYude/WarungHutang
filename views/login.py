@@ -1,29 +1,23 @@
-"""
-views/login.py
-
-Halaman/jendela login aplikasi Warung Hutang.
-
-Catatan desain:
-- Jendela ini dibuat sebagai CTk (root) yang berdiri sendiri untuk PHASE 2,
-  supaya bisa langsung dites. Mulai PHASE 3, alur ini akan disatukan
-  dengan main window (sidebar) - biasanya login window tampil dulu,
-  lalu ditutup dan digantikan main window setelah sukses.
-- on_login_success(user) dipanggil setelah login berhasil, membawa data
-  user (tanpa password_hash) agar main window tahu siapa yang sedang login.
-"""
-
 import customtkinter as ctk
 import os
 
+from components.forms import ErrorText, FormField
 from database.database import Database
 from models.user import UserModel
+from models.settings import SettingsModel
 from utils.error_handler import install_global_error_handler
+from utils.theme import COLORS, RADIUS, SPACING, button_style, get_font
 
-ctk.set_appearance_mode("light")
-ctk.set_default_color_theme("blue")
 
-WINDOW_WIDTH = 380
-WINDOW_HEIGHT = 440
+WINDOW_WIDTH = 400
+WINDOW_HEIGHT = 480
+
+# Lebar isi kartu = lebar jendela - jarak luar kartu - jarak dalam kartu.
+OUTER_PADDING = SPACING["xl"]
+INNER_PADDING = SPACING["xl"]
+CONTENT_WIDTH = WINDOW_WIDTH - (OUTER_PADDING * 2) - (INNER_PADDING * 2)
+
+TOGGLE_BUTTON_WIDTH = 88
 
 
 class LoginWindow(ctk.CTk):
@@ -33,10 +27,13 @@ class LoginWindow(ctk.CTk):
         self.on_login_success = on_login_success
         self.db = db or Database()
         self.user_model = UserModel(self.db)
+        self.settings_model = SettingsModel(self.db)
+        self.store_name = self.settings_model.get_nama_warung()
         self._password_visible = False
 
-        self.title("Warung Hutang - Login")
+        self.title(f"{self.store_name} - Login")
         self.resizable(False, False)
+        self.configure(fg_color=COLORS["background"])
         self._center_on_screen(WINDOW_WIDTH, WINDOW_HEIGHT)
         self._set_icon()
 
@@ -66,67 +63,106 @@ class LoginWindow(ctk.CTk):
     # UI
     # ------------------------------------------------------------------
     def _build_ui(self):
-        container = ctk.CTkFrame(self, corner_radius=16)
-        container.pack(expand=True, fill="both", padx=24, pady=24)
+        container = ctk.CTkFrame(
+            self,
+            corner_radius=RADIUS["card"],
+            fg_color=COLORS["surface"],
+            border_width=1,
+            border_color=COLORS["border"],
+        )
+        container.pack(
+            expand=True,
+            fill="both",
+            padx=OUTER_PADDING,
+            pady=OUTER_PADDING,
+        )
 
         ctk.CTkLabel(
             container,
-            text="Warung Hutang",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(pady=(32, 4))
+            text=self.store_name,
+            font=get_font("title"),
+            text_color=COLORS["text"],
+            wraplength=CONTENT_WIDTH,
+            justify="center",
+        ).pack(
+            padx=INNER_PADDING,
+            pady=(SPACING["xxl"], SPACING["xs"]),
+        )
 
         ctk.CTkLabel(
             container,
             text="Silakan login untuk melanjutkan",
-            font=ctk.CTkFont(size=13),
-            text_color="gray50",
-        ).pack(pady=(0, 24))
+            font=get_font("body"),
+            text_color=COLORS["text_secondary"],
+        ).pack(pady=(0, SPACING["xl"]))
 
         # Username
-        ctk.CTkLabel(container, text="Username", anchor="w").pack(
-            fill="x", padx=32
+        self.username_field = FormField(
+            container,
+            "Username",
+            "Masukkan username",
         )
-        self.username_entry = ctk.CTkEntry(
-            container, placeholder_text="Masukkan username", height=38
-        )
-        self.username_entry.pack(fill="x", padx=32, pady=(4, 16))
+        self.username_field.pack(fill="x", padx=INNER_PADDING)
+        self.username_entry = self.username_field.entry
 
-        # Password
-        ctk.CTkLabel(container, text="Password", anchor="w").pack(
-            fill="x", padx=32
+        # Password + tombol lihat/sembunyi
+        password_row = ctk.CTkFrame(
+            container,
+            fg_color="transparent",
+            width=0,
+            height=0,
         )
-        password_row = ctk.CTkFrame(container, fg_color="transparent")
-        password_row.pack(fill="x", padx=32, pady=(4, 4))
+        password_row.pack(
+            fill="x",
+            padx=INNER_PADDING,
+            pady=(SPACING["lg"], 0),
+        )
         password_row.grid_columnconfigure(0, weight=1)
 
-        self.password_entry = ctk.CTkEntry(
-            password_row, placeholder_text="Masukkan password", show="*", height=38
+        self.password_field = FormField(
+            password_row,
+            "Password",
+            "Masukkan password",
         )
-        self.password_entry.grid(row=0, column=0, sticky="ew")
+        self.password_field.grid(row=0, column=0, sticky="ew")
+        self.password_entry = self.password_field.entry
+        self.password_entry.configure(show="*")
 
         self.toggle_btn = ctk.CTkButton(
             password_row,
             text="Lihat",
-            width=56,
-            height=38,
-            fg_color="gray80",
-            text_color="black",
-            hover_color="gray70",
+            width=TOGGLE_BUTTON_WIDTH,
             command=self._toggle_password_visibility,
+            **button_style("secondary"),
         )
-        self.toggle_btn.grid(row=0, column=1, padx=(8, 0))
+        self.toggle_btn.grid(
+            row=0,
+            column=1,
+            sticky="s",
+            padx=(SPACING["sm"], 0),
+        )
 
         # Label error (kosong secara default, muncul saat ada masalah)
-        self.error_label = ctk.CTkLabel(
-            container, text="", text_color="#D64545", font=ctk.CTkFont(size=12)
+        self.error_label = ErrorText(container)
+        self.error_label.configure(wraplength=CONTENT_WIDTH)
+        self.error_label.pack(
+            fill="x",
+            padx=INNER_PADDING,
+            pady=(SPACING["sm"], 0),
         )
-        self.error_label.pack(fill="x", padx=32, pady=(8, 0))
 
         # Tombol masuk
         self.login_button = ctk.CTkButton(
-            container, text="Masuk", height=40, command=self._handle_login
+            container,
+            text="Masuk",
+            command=self._handle_login,
+            **button_style("primary"),
         )
-        self.login_button.pack(fill="x", padx=32, pady=(16, 32))
+        self.login_button.pack(
+            fill="x",
+            padx=INNER_PADDING,
+            pady=(SPACING["lg"], SPACING["xxl"]),
+        )
 
         # Enter menekan tombol masuk dari field manapun
         self.bind("<Return>", lambda event: self._handle_login())
@@ -180,7 +216,7 @@ class LoginWindow(ctk.CTk):
             self.destroy()
 
     def _show_error(self, message: str):
-        self.error_label.configure(text=message)
+        self.error_label.show(message)
 
 
 if __name__ == "__main__":

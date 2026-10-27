@@ -1,29 +1,11 @@
-"""
-app.py
 
-Entry point aplikasi Warung Hutang.
-
-PHASE 1: inisialisasi database.
-PHASE 2: + halaman login.
-PHASE 3: + main window (sidebar & navigasi) dan alur login <-> logout.
-
-Alur aplikasi saat ini:
-    1. Inisialisasi database (buat tabel + akun admin default jika perlu).
-    2. Tampilkan halaman login.
-    3. Jika login berhasil -> tampilkan main window (sidebar + halaman
-       placeholder untuk tiap menu; isi sungguhan menyusul di phase
-       berikutnya).
-    4. Jika pengguna menekan Logout -> kembali ke halaman login.
-    5. Jika jendela ditutup langsung (tombol X) di halaman manapun ->
-       aplikasi berakhir sepenuhnya.
-"""
 
 import os
 
 from database.database import Database, get_database_path
 from views.login import LoginWindow
 from views.main_window import MainWindow
-
+from utils.theme import apply_theme
 
 def initialize_database_or_exit() -> Database:
     """
@@ -136,6 +118,7 @@ def _log_crash_to_file(exc: Exception):
 
 
 if __name__ == "__main__":
+    apply_theme()
     try:
         main()
     except Exception as e:  # noqa: BLE001 - jaring pengaman terakhir, sengaja luas

@@ -1,5 +1,7 @@
 -r requirements.txt
 
+pytest>=8.0
+
 # PyInstaller hanya dibutuhkan saat MEMBUAT file .exe, bukan untuk
 # menjalankan aplikasi sehari-hari. Dipisah dari requirements.txt supaya
 # instalasi biasa (pip install -r requirements.txt) tetap ringan.

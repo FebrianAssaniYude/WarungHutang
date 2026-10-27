@@ -1,23 +1,8 @@
-"""
-models/report.py
-
-Laporan bulanan: ringkasan aktivitas BULAN TERSEBUT saja (hutang &
-pembayaran yang dibuat/dilakukan pada bulan itu) - TIDAK dicampur
-dengan saldo pelanggan yang masih berjalan dari bulan-bulan sebelumnya.
-
-"Saldo saat ini" ditampilkan terpisah sebagai info tambahan (total
-sisa hutang seluruh pelanggan per hari ini), sesuai spesifikasi:
-    Aktivitas bulan tersebut   != Saldo saat ini
-
-Export PDF memakai reportlab (satu-satunya dependency tambahan untuk
-fitur ini) dengan layout teks sederhana - sengaja tidak memakai
-komponen berat (grafik, gambar, dsb) supaya tetap ringan.
-"""
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
-
+from models.settings import SettingsModel
 from database.database import Database
 from utils.formatter import format_rupiah, format_date_indonesia, BULAN_INDONESIA
 
@@ -105,11 +90,185 @@ class ReportModel:
             "current_outstanding_balance": global_debt - global_paid,
             "details": details,
         }
+    # ------------------------------------------------------------------
+    # Data dashboard
+    # ------------------------------------------------------------------
+    def get_dashboard_summary(self, low_stock_threshold: int = 5):
+        """
+        Mengambil ringkasan data untuk Dashboard.
+        """
+        with self.db.transaction() as conn:
+            customer_count = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM customers
+                WHERE is_active = 1;
+                """
+            ).fetchone()["total"]
 
+            product_count = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM products
+                WHERE is_active = 1;
+                """
+            ).fetchone()["total"]
+
+            low_stock_count = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM products
+                WHERE is_active = 1
+                  AND stock <= ?;
+                """,
+                (int(low_stock_threshold),),
+            ).fetchone()["total"]
+
+            total_debt = conn.execute(
+                """
+                SELECT COALESCE(SUM(total_amount), 0) AS total
+                FROM debt_transactions;
+                """
+            ).fetchone()["total"]
+
+            total_payment = conn.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0) AS total
+                FROM payments;
+                """
+            ).fetchone()["total"]
+
+            today_sales = conn.execute(
+                """
+                SELECT COALESCE(SUM(total_amount), 0) AS total
+                FROM sales
+                WHERE date(transaction_date) = date('now', 'localtime');
+                """
+            ).fetchone()["total"]
+
+            today_purchases = conn.execute(
+                """
+                SELECT COALESCE(SUM(total_amount), 0) AS total
+                FROM purchases
+                WHERE date(transaction_date) = date('now', 'localtime');
+                """
+            ).fetchone()["total"]
+
+            today_debt = conn.execute(
+                """
+                SELECT COALESCE(SUM(total_amount), 0) AS total
+                FROM debt_transactions
+                WHERE date(transaction_date) = date('now', 'localtime');
+                """
+            ).fetchone()["total"]
+
+            today_payments = conn.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0) AS total
+                FROM payments
+                WHERE date(payment_date) = date('now', 'localtime');
+                """
+            ).fetchone()["total"]
+
+            recent_sales = conn.execute(
+                """
+                SELECT
+                    id,
+                    transaction_number,
+                    transaction_date AS date,
+                    'Penjualan' AS type,
+                    total_amount AS amount
+                FROM sales
+                ORDER BY transaction_date DESC, id DESC
+                LIMIT 10;
+                """
+            ).fetchall()
+
+            recent_purchases = conn.execute(
+                """
+                SELECT
+                    id,
+                    transaction_number,
+                    transaction_date AS date,
+                    'Pembelian' AS type,
+                    total_amount AS amount
+                FROM purchases
+                ORDER BY transaction_date DESC, id DESC
+                LIMIT 10;
+                """
+            ).fetchall()
+
+            recent_debts = conn.execute(
+                """
+                SELECT
+                    id,
+                    transaction_number,
+                    transaction_date AS date,
+                    'Hutang' AS type,
+                    total_amount AS amount
+                FROM debt_transactions
+                ORDER BY transaction_date DESC, id DESC
+                LIMIT 10;
+                """
+            ).fetchall()
+
+            recent_payments = conn.execute(
+                """
+                SELECT
+                    id,
+                    NULL AS transaction_number,
+                    payment_date AS date,
+                    'Pembayaran' AS type,
+                    amount
+                FROM payments
+                ORDER BY payment_date DESC, id DESC
+                LIMIT 10;
+                """
+            ).fetchall()
+
+        recent_transactions = [
+            dict(row)
+            for row in (
+                list(recent_sales)
+                + list(recent_purchases)
+                + list(recent_debts)
+                + list(recent_payments)
+            )
+        ]
+
+        recent_transactions.sort(
+            key=lambda item: (
+                item.get("date") or "",
+                item.get("id") or 0,
+            ),
+            reverse=True,
+        )
+
+        return {
+            "total_outstanding": total_debt - total_payment,
+            "total_customers": customer_count,
+            "total_products": product_count,
+            "low_stock_products": low_stock_count,
+            "today_sales": today_sales,
+            "today_purchases": today_purchases,
+            "today_debt": today_debt,
+            "today_payments": today_payments,
+            "recent_transactions": recent_transactions[:10],
+        }
     # ------------------------------------------------------------------
     # Export PDF (ringan - teks biasa, tanpa grafik/gambar)
     # ------------------------------------------------------------------
-    def export_to_pdf(self, report: dict, output_path: str, store_name: str = "Warung Hutang"):
+    def export_to_pdf(
+    self,
+    report: dict,
+    output_path: str,
+    store_name: str = None,
+):
+        if not store_name:
+            try:
+                store_name = SettingsModel(self.db).get_nama_warung()
+            except Exception:
+                store_name = "Warung Hutang"
         page_width, page_height = A4
         margin_left = 2 * cm
         margin_top = page_height - 2 * cm
