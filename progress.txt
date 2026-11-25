@@ -1,7 +1,7 @@
 PROJECT: Warung Hutang
-LAST UPDATED: 2026-11-26 04:53:44 +07:00
-CURRENT PHASE: Phase 2 - Riwayat Pelanggan & Detail Barang pada PDF (Implemented)
-OVERALL STATUS: Phase 2 implemented and verified; waiting for review + commit
+LAST UPDATED: 2026-11-26 05:09:25 +07:00
+CURRENT PHASE: Phase 2 - Riwayat Pelanggan & Detail Barang pada PDF (Committed)
+OVERALL STATUS: Phase 1 + Phase 2 committed (a58de53); next is EXE/UI smoke test
 
 ==============================================================================
 A. PROJECT OVERVIEW
@@ -79,7 +79,7 @@ Phase 1: Backup, restore, dan kompatibilitas database.
 - Catatan: perubahan implementasi Phase 1 masih belum di-commit.
 
 Phase 2: Integritas transaksi dan siklus hutang pelanggan.
-- Status: IMPLEMENTED - VERIFIED, menunggu review + commit.
+- Status: IMPLEMENTED - VERIFIED - COMMITTED (a58de53).
 - PDF "Cetak Riwayat" pada detail pelanggan sekarang menampilkan
   rincian barang (nama, qty, harga, subtotal) per transaksi hutang.
 - Implementasi tanpa perubahan schema, lokasi database, atau nama EXE.
@@ -338,11 +338,11 @@ WH-017 | Perubahan Phase 1 + Phase 2 belum di-commit
 - Bukti: 15 file modified + 6 file untracked (termasuk progress.txt dan
   test baru).
 - Rekomendasi: Review diff, lalu commit setelah pengguna menyetujui.
-- Status: OPEN
-- Dependensi/risiko: Perubahan bisa hilang jika working tree tidak
-  sengaja direset.
+- Status: VERIFIED - commit `a58de53` (22 file, +4193/-183).
+- Dependensi/risiko: Commit tidak menyertakan database produksi,
+  backup, atau file runtime.
 - Kriteria keberhasilan: Commit berisi perubahan Phase 1, Phase 2, dan
-  test terkait.
+  test terkait. Terpenuhi.
 
 ==============================================================================
 D. COMPLETED WORK
@@ -469,13 +469,11 @@ Risiko regresi yang masih terbuka:
 F. PENDING WORK
 ==============================================================================
 
-1. Review diff Phase 1 + Phase 2, lalu commit setelah persetujuan
-   pengguna (WH-017).
-2. Smoke test UI restore/logout (WH-016).
-3. Smoke test EXE dan regresi Phase 4.
-4. Verifikasi visual PDF riwayat pelanggan memakai data nyata di GUI
+1. Smoke test UI restore/logout (WH-016).
+2. Smoke test EXE dan regresi Phase 4.
+3. Verifikasi visual PDF riwayat pelanggan memakai data nyata di GUI
    (opsional; data sintetis sudah lolos uji struktural).
-5. Normalisasi schema drift (WH-014) ditunda sampai ada keputusan
+4. Normalisasi schema drift (WH-014) ditunda sampai ada keputusan
    migrasi khusus.
 
 ==============================================================================
@@ -525,19 +523,18 @@ H. NEXT ACTION
 ==============================================================================
 
 Satu langkah berikutnya:
-- Review diff Phase 1 + Phase 2 bersama pengguna, lalu commit jika
-  disetujui (WH-017).
+- Smoke test UI restore -> dialog sukses -> logout (WH-016) memakai
+  salinan backup, bukan database produksi.
 
 Alasan:
-- Implementasi dan pengujian sudah selesai; belum ada commit sehingga
-  perubahan masih berisiko hilang.
-- Database produksi tidak boleh diubah oleh proses commit/review.
+- Phase 1 + Phase 2 sudah ter-commit (a58de53) dan lolos test otomatis.
+- Satu-satunya alur kritis yang belum diuji dengan klik nyata adalah
+  logout otomatis setelah restore.
 
 Syarat sebelum melanjutkan:
-- Pengguna menyetujui isi diff (termasuk `tests/test_migration.py` dan
-  `.gitignore`).
-- Commit tidak menyertakan `data/warung.db`, `data/backup/`,
-  `data/.warung.lock`, atau artefak runtime lain.
+- Gunakan salinan/temp database sebagai target restore.
+- Jangan mengubah `data/warung.db` produksi.
+- Catat hasil smoke test (pass/gagal) di progress.txt.
 
 ==============================================================================
 END OF FILE
