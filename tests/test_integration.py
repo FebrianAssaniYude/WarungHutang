@@ -683,6 +683,41 @@ try:
         report is not None,
     )
 
+    report_debt_items = [
+        item
+        for entry in (report or {}).get("details", [])
+        if entry.get("type") == "Hutang"
+        for item in (entry.get("items") or [])
+    ]
+
+    check(
+        "Monthly report memuat rincian barang hutang",
+        len(report_debt_items) > 0,
+    )
+
+    report_purchases = (report or {}).get("purchases", [])
+
+    check(
+        "Monthly report memuat riwayat pembelian",
+        len(report_purchases) > 0,
+    )
+
+    report_purchase_items = [
+        item
+        for purchase in report_purchases
+        for item in (purchase.get("items") or [])
+    ]
+
+    check(
+        "Monthly report memuat rincian barang pembelian",
+        len(report_purchase_items) > 0,
+    )
+
+    check(
+        "Monthly report menghitung total pembelian",
+        (report or {}).get("total_purchase_month", 0) > 0,
+    )
+
     report_pdf = os.path.join(
         PDF_DIR,
         "laporan_integration.pdf",

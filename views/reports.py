@@ -5,10 +5,12 @@ from datetime import datetime
 import customtkinter as ctk
 
 from components.cards import SectionCard, StatCard
+from components.detail_dialogs import PurchaseDetailDialog
 from components.dialogs import show_error, show_warning
 from components.forms import ErrorText, FormField, option_menu_style
 from components.page_header import PageHeader
 from components.tables import DataTable
+from models.purchase import PurchaseModel
 from models.report import ReportModel
 from utils.formatter import BULAN_INDONESIA, format_date_indonesia, format_rupiah
 from utils.printer import Printer, PrinterError
@@ -21,6 +23,16 @@ DETAIL_COLUMNS = [
     {"title": "Nominal", "weight": 3, "align": "right"},
 ]
 
+PURCHASE_COLUMNS = [
+    {"title": "Tanggal", "weight": 2, "align": "left"},
+    {"title": "No. Transaksi", "weight": 4, "align": "left"},
+    {"title": "Supplier", "weight": 3, "align": "left"},
+    {"title": "Total", "weight": 3, "align": "right"},
+]
+
+MODE_HUTANG = "Hutang & Pembayaran"
+MODE_PEMBELIAN = "Pembelian"
+
 # Warna titik di kolom kiri tabel per jenis transaksi.
 # Samakan dengan TYPE_VARIANTS di views/history.py dan views/dashboard.py.
 TYPE_VARIANTS = {
@@ -28,13 +40,9 @@ TYPE_VARIANTS = {
     "Pembayaran": "success",
 }
 
-# (kunci laporan, judul kartu)
-MONTH_CARDS = [
-    ("total_debt_month", "Total Hutang Bulan Ini"),
-    ("total_payment_month", "Total Pembayaran Bulan Ini"),
-    ("count_debt_transactions", "Jumlah Transaksi Hutang"),
-    ("count_payment_transactions", "Jumlah Transaksi Pembayaran"),
-]
+# Empat kartu ringkasan dipakai ulang; judul dan nilainya berganti
+# mengikuti mode laporan (hutang/pembayaran atau pembelian).
+MONTH_CARD_KEYS = ["card_0", "card_1", "card_2", "card_3"]
 
 # Treeview ringan, jadi satu halaman bisa memuat lebih banyak baris.
 PAGE_SIZE = 500
@@ -74,13 +82,16 @@ class LaporanPage(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
 
         self.report_model = report_model
+        self.purchase_model = PurchaseModel(report_model.db)
 
         now = datetime.now()
         self.selected_year = now.year
         self.selected_month = now.month
         self.current_report = None
         self._details = []
+        self._purchases = []
         self._shown = PAGE_SIZE
+        self.mode_var = ctk.StringVar(value=MODE_HUTANG)
         self._build_ui()
 
         # Tidak memanggil refresh() di sini: halaman dimuat saat pertama
@@ -110,9 +121,41 @@ class LaporanPage(ctk.CTkFrame):
             **button_style("primary"),
         ).pack()
 
+        self._build_mode_switch(page_padding)
         self._build_filter_card(page_padding)
         self._build_summary_cards(page_padding)
         self._build_detail_card(page_padding)
+
+    def _build_mode_switch(self, page_padding):
+        bar = ctk.CTkFrame(
+            self,
+            fg_color="transparent",
+            width=0,
+            height=0,
+        )
+        bar.pack(
+            fill="x",
+            padx=page_padding,
+            pady=(0, SPACING["md"]),
+        )
+
+        self.mode_switch = ctk.CTkSegmentedButton(
+            bar,
+            values=[MODE_HUTANG, MODE_PEMBELIAN],
+            variable=self.mode_var,
+            command=self._switch_mode,
+            font=get_font("button_small"),
+            height=32,
+            corner_radius=8,
+            fg_color=COLORS["background"],
+            selected_color=COLORS["primary"],
+            selected_hover_color=COLORS["primary_hover"],
+            unselected_color=COLORS["surface"],
+            unselected_hover_color=COLORS["surface_hover"],
+            text_color=COLORS["text"],
+            text_color_disabled=COLORS["text_muted"],
+        )
+        self.mode_switch.pack(side="left")
 
     # ------------------------------------------------------------------
     # Filter bulan / tahun
@@ -219,17 +262,17 @@ class LaporanPage(ctk.CTkFrame):
 
         self.month_cards = {}
 
-        for column, (key, title) in enumerate(MONTH_CARDS):
+        for column, key in enumerate(MONTH_CARD_KEYS):
             frame.grid_columnconfigure(column, weight=1, uniform="stat")
 
-            card = StatCard(frame, title)
+            card = StatCard(frame, "")
             card.grid(
                 row=0,
                 column=column,
                 sticky="nsew",
                 padx=(
                     0 if column == 0 else half_gap,
-                    0 if column == len(MONTH_CARDS) - 1 else half_gap,
+                    0 if column == len(MONTH_CARD_KEYS) - 1 else half_gap,
                 ),
             )
             self.month_cards[key] = card
@@ -272,13 +315,31 @@ class LaporanPage(ctk.CTkFrame):
             **button_style("secondary", "small"),
         )
 
-        self.detail_table = DataTable(
+        self.table_holder = ctk.CTkFrame(
             card.body,
+            fg_color="transparent",
+            width=0,
+            height=0,
+        )
+        self.table_holder.pack(fill="both", expand=True)
+
+        self.detail_table = DataTable(
+            self.table_holder,
             DETAIL_COLUMNS,
             empty_title="Tidak ada transaksi",
             empty_text="Tidak ada transaksi pada bulan ini.",
             show_dot=True,
         )
+
+        self.purchase_table = DataTable(
+            self.table_holder,
+            PURCHASE_COLUMNS,
+            empty_title="Tidak ada pembelian",
+            empty_text="Tidak ada pembelian pada bulan ini.",
+            on_activate=self._open_purchase_detail,
+            show_dot=True,
+        )
+
         self.detail_table.pack(fill="both", expand=True)
 
     # ------------------------------------------------------------------
@@ -314,11 +375,12 @@ class LaporanPage(ctk.CTkFrame):
             self.current_report = None
             self._clear_summary()
             self._details = []
+            self._purchases = []
             self._update_footer()
-            self.detail_table.set_error(
-                "Gagal memuat laporan",
-                "Terjadi kesalahan saat memuat laporan. Coba lagi.",
-            )
+            error_title = "Gagal memuat laporan"
+            error_text = "Terjadi kesalahan saat memuat laporan. Coba lagi."
+            self.detail_table.set_error(error_title, error_text)
+            self.purchase_table.set_error(error_title, error_text)
             return
 
         self._render_summary(self.current_report)
@@ -331,20 +393,40 @@ class LaporanPage(ctk.CTkFrame):
         self.balance_card.set_value("-")
 
     def _render_summary(self, report: dict):
-        self.month_cards["total_debt_month"].set_value(
-            format_rupiah(report["total_debt_month"]),
-            color=COLORS["danger"],
-        )
-        self.month_cards["total_payment_month"].set_value(
-            format_rupiah(report["total_payment_month"]),
-            color=COLORS["success"],
-        )
-        self.month_cards["count_debt_transactions"].set_value(
-            str(report["count_debt_transactions"])
-        )
-        self.month_cards["count_payment_transactions"].set_value(
-            str(report["count_payment_transactions"])
-        )
+        cards = [self.month_cards[key] for key in MONTH_CARD_KEYS]
+
+        if self._is_purchase_mode():
+            total = report.get("total_purchase_month", 0)
+            count = report.get("count_purchase_month", 0)
+            item_count = report.get("total_purchase_items_month", 0)
+            average = int(round(total / count)) if count else 0
+
+            cards[0].set_title("Total Pembelian Bulan Ini")
+            cards[0].set_value(
+                format_rupiah(total),
+                color=COLORS["text"],
+            )
+            cards[1].set_title("Jumlah Transaksi Pembelian")
+            cards[1].set_value(str(count))
+            cards[2].set_title("Jumlah Barang Dibeli")
+            cards[2].set_value(str(item_count))
+            cards[3].set_title("Rata-rata per Transaksi")
+            cards[3].set_value(format_rupiah(average))
+        else:
+            cards[0].set_title("Total Hutang Bulan Ini")
+            cards[0].set_value(
+                format_rupiah(report["total_debt_month"]),
+                color=COLORS["danger"],
+            )
+            cards[1].set_title("Total Pembayaran Bulan Ini")
+            cards[1].set_value(
+                format_rupiah(report["total_payment_month"]),
+                color=COLORS["success"],
+            )
+            cards[2].set_title("Jumlah Transaksi Hutang")
+            cards[2].set_value(str(report["count_debt_transactions"]))
+            cards[3].set_title("Jumlah Transaksi Pembayaran")
+            cards[3].set_value(str(report["count_payment_transactions"]))
 
         balance = report["current_outstanding_balance"]
 
@@ -354,28 +436,47 @@ class LaporanPage(ctk.CTkFrame):
         )
 
     def _render_details(self, report: dict):
-        self._details = list(report["details"])
+        self._details = list(report.get("details") or [])
+        self._purchases = list(report.get("purchases") or [])
         self._shown = PAGE_SIZE
         self._render_rows()
 
     def _render_rows(self):
-        visible = self._details[: self._shown]
+        if self._is_purchase_mode():
+            self.detail_table.pack_forget()
+            self.purchase_table.pack(fill="both", expand=True)
 
-        self.detail_table.set_rows(
-            [self._detail_values(item) for item in visible],
-            variants=[
-                TYPE_VARIANTS.get(item["type"], "neutral")
-                for item in visible
-            ],
-        )
+            visible = self._purchases[: self._shown]
+
+            self.purchase_table.set_rows(
+                [self._purchase_values(item) for item in visible],
+                variants=["neutral"] * len(visible),
+            )
+        else:
+            self.purchase_table.pack_forget()
+            self.detail_table.pack(fill="both", expand=True)
+
+            visible = self._details[: self._shown]
+
+            self.detail_table.set_rows(
+                [self._detail_values(item) for item in visible],
+                variants=[
+                    TYPE_VARIANTS.get(item["type"], "neutral")
+                    for item in visible
+                ],
+            )
+
         self._update_footer()
 
     def _update_footer(self):
-        total = len(self._details)
+        purchase_mode = self._is_purchase_mode()
+        active = self._purchases if purchase_mode else self._details
+        total = len(active)
         shown = min(self._shown, total)
+        noun = "pembelian" if purchase_mode else "transaksi"
 
         self.count_label.configure(
-            text=f"Menampilkan {shown} dari {total} transaksi" if total else ""
+            text=f"Menampilkan {shown} dari {total} {noun}" if total else ""
         )
 
         if total > shown:
@@ -397,6 +498,52 @@ class LaporanPage(ctk.CTkFrame):
             item["type"],
             f"{sign} {format_rupiah(item['amount'])}",
         ]
+
+    @staticmethod
+    def _purchase_values(item: dict) -> list:
+        return [
+            format_date_indonesia(item["date"]),
+            item.get("transaction_number") or "Transaksi Lama",
+            item.get("supplier_name") or "Tidak ada supplier",
+            format_rupiah(item.get("total_amount", 0)),
+        ]
+
+    def _is_purchase_mode(self) -> bool:
+        return self.mode_var.get() == MODE_PEMBELIAN
+
+    def _switch_mode(self, _value=None):
+        self._shown = PAGE_SIZE
+
+        if self.current_report:
+            self._render_summary(self.current_report)
+
+        self._render_rows()
+
+    def _open_purchase_detail(self, index: int):
+        if not (0 <= index < len(self._purchases)):
+            return
+
+        entry = self._purchases[index]
+
+        try:
+            detail = self.purchase_model.get_transaction_detail(entry["id"])
+        except Exception:
+            show_error(
+                self,
+                "Terjadi Kesalahan",
+                "Gagal memuat detail pembelian. Coba lagi.",
+            )
+            return
+
+        if not detail:
+            show_warning(
+                self,
+                "Data Tidak Ditemukan",
+                "Transaksi pembelian tidak ditemukan.",
+            )
+            return
+
+        PurchaseDetailDialog(self, detail)
 
     # ------------------------------------------------------------------
     # Cetak PDF

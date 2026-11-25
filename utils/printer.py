@@ -52,6 +52,7 @@ CELL_PADDING = 5
 ITEM_COLUMNS = [80 * mm, 18 * mm, 38 * mm, 44 * mm]
 HISTORY_COLUMNS = [30 * mm, 22 * mm, 50 * mm, 36 * mm, 42 * mm]
 REPORT_COLUMNS = [34 * mm, 72 * mm, 28 * mm, 46 * mm]
+PURCHASE_REPORT_COLUMNS = [34 * mm, 60 * mm, 50 * mm, 36 * mm]
 STAT_COLUMNS = [90 * mm, 90 * mm]
 
 COLOR_TEXT = colors.black
@@ -669,46 +670,66 @@ class Printer:
         timeline: List[Dict[str, Any]],
         styles: Dict[str, ParagraphStyle],
     ) -> List[Any]:
-        """
-        Rincian barang untuk setiap transaksi hutang pada riwayat
-        pelanggan.
-
-        Tabel timeline tetap menjadi ringkasan. Bagian ini memberi
-        konteks barang (nama, qty, harga, subtotal) tanpa mengubah
-        bentuk tabel utama. Transaksi lama tanpa rincian tetap
-        ditampilkan dengan keterangan agar pengguna tahu datanya memang
-        tidak tersimpan.
-        """
+        """Rincian barang untuk setiap transaksi hutang pelanggan."""
         debt_entries = [
             entry
             for entry in timeline
             if (entry.get("type") or "") == "Hutang"
         ]
 
-        if not debt_entries:
+        return self._build_item_details_sections(
+            debt_entries,
+            styles,
+            "Rincian Barang per Transaksi",
+        )
+
+    def _build_item_details_sections(
+        self,
+        entries: List[Dict[str, Any]],
+        styles: Dict[str, ParagraphStyle],
+        title: str,
+        price_title: str = "Harga",
+        reference_key: str = "transaction_number",
+        subtitle_key: Optional[str] = None,
+    ) -> List[Any]:
+        """
+        Bagian rincian barang per transaksi.
+
+        Dipakai oleh riwayat pelanggan dan laporan bulanan. `entries`
+        harus memiliki date, amount, items, dan kunci referensi
+        (default transaction_number). Transaksi lama tanpa rincian tetap
+        ditampilkan dengan keterangan agar pengguna tahu datanya memang
+        tidak tersimpan.
+        """
+        if not entries:
             return []
 
         elements: List[Any] = [
             Spacer(1, SECTION_GAP),
-            Paragraph(
-                "Rincian Barang per Transaksi",
-                styles["section_title"],
-            ),
+            Paragraph(title, styles["section_title"]),
             Spacer(1, 2 * mm),
         ]
 
-        for entry in debt_entries:
+        for entry in entries:
             items = entry.get("items") or []
 
             reference = (
-                entry.get("transaction_number") or "Transaksi Lama"
+                entry.get(reference_key) or "Transaksi Lama"
             )
             date_text = format_date_indonesia(entry.get("date"))
 
+            header_parts = [
+                f"<b>{self._escape_text(reference)}</b>",
+                self._escape_text(date_text),
+            ]
+
+            subtitle = entry.get(subtitle_key) if subtitle_key else None
+            if subtitle:
+                header_parts.append(self._escape_text(subtitle))
+
             elements.append(
                 Paragraph(
-                    f"<b>{self._escape_text(reference)}</b> - "
-                    f"{self._escape_text(date_text)}",
+                    " - ".join(header_parts),
                     styles["normal"],
                 )
             )
@@ -716,14 +737,19 @@ class Printer:
 
             if items:
                 elements.append(
-                    self._build_items_table("Harga", items, styles)
+                    self._build_items_table(price_title, items, styles)
                 )
                 elements.append(Spacer(1, 1 * mm))
                 elements.append(
                     Paragraph(
                         "Total transaksi: "
                         + self._escape_text(
-                            self._money(entry.get("amount"))
+                            self._money(
+                                entry.get(
+                                    "amount",
+                                    entry.get("total_amount", 0),
+                                )
+                            )
                         ),
                         styles["table_cell_right"],
                     )
@@ -754,9 +780,10 @@ class Printer:
         Laporan bulanan. `data` adalah hasil
         ReportModel.get_monthly_report().
 
-        Susunan: header, kotak ringkasan (2 x 2 + saldo), catatan,
-        lalu tabel detail bergaris selang-seling. Halaman berikutnya
-        mendapat judul berjalan di bagian atas.
+        Susunan: header, kotak ringkasan (hutang, pembayaran,
+        pembelian, saldo), catatan, tabel detail, rincian barang hutang,
+        lalu riwayat pembelian + rincian barang pembelian. Halaman
+        berikutnya mendapat judul berjalan di bagian atas.
         """
         try:
             month_name = BULAN_INDONESIA[int(data.get("month", 1)) - 1]
@@ -812,6 +839,16 @@ class Printer:
                 ],
                 [
                     tile(
+                        "Total Pembelian Bulan Ini",
+                        self._money(data.get("total_purchase_month")),
+                    ),
+                    tile(
+                        "Jumlah Transaksi Pembelian",
+                        str(data.get("count_purchase_month", 0)),
+                    ),
+                ],
+                [
+                    tile(
                         "Saldo Saat Ini (Seluruh Pelanggan)",
                         self._money(data.get("current_outstanding_balance")),
                         big=True,
@@ -826,10 +863,10 @@ class Printer:
             TableStyle(
                 [
                     ("BOX", (0, 0), (-1, -1), 0.8, COLOR_TEXT),
-                    ("INNERGRID", (0, 0), (-1, 1), 0.5, COLOR_GRID),
-                    ("LINEABOVE", (0, 2), (-1, 2), 0.8, COLOR_TEXT),
-                    ("BACKGROUND", (0, 2), (-1, 2), COLOR_HEADER_BG),
-                    ("SPAN", (0, 2), (1, 2)),
+                    ("INNERGRID", (0, 0), (-1, 2), 0.5, COLOR_GRID),
+                    ("LINEABOVE", (0, 3), (-1, 3), 0.8, COLOR_TEXT),
+                    ("BACKGROUND", (0, 3), (-1, 3), COLOR_HEADER_BG),
+                    ("SPAN", (0, 3), (1, 3)),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                     ("LEFTPADDING", (0, 0), (-1, -1), 8),
                     ("RIGHTPADDING", (0, 0), (-1, -1), 8),
@@ -931,6 +968,128 @@ class Printer:
         table.setStyle(grid)
 
         elements.append(table)
+
+        # -----------------------------------------------------
+        # Rincian barang hutang
+        # -----------------------------------------------------
+        debt_entries = [
+            item
+            for item in details
+            if (item.get("type") or "") == "Hutang"
+        ]
+
+        elements.extend(
+            self._build_item_details_sections(
+                debt_entries,
+                styles,
+                "Rincian Barang Hutang per Transaksi",
+            )
+        )
+
+        # -----------------------------------------------------
+        # Riwayat pembelian bulan ini
+        # -----------------------------------------------------
+        purchases = data.get("purchases") or []
+
+        elements.append(Spacer(1, SECTION_GAP))
+
+        purchase_title = "Riwayat Pembelian Bulan Ini"
+
+        if purchases:
+            purchase_title += f" ({len(purchases)} transaksi)"
+
+        elements.append(
+            Paragraph(purchase_title, styles["section_title"])
+        )
+        elements.append(Spacer(1, 2 * mm))
+
+        elements.append(
+            Paragraph(
+                "Total Pembelian: "
+                + self._escape_text(
+                    self._money(data.get("total_purchase_month"))
+                ),
+                styles["normal"],
+            )
+        )
+        elements.append(Spacer(1, 1 * mm))
+
+        purchase_rows = [
+            [
+                Paragraph("Tanggal", styles["table_header"]),
+                Paragraph("No. Transaksi", styles["table_header"]),
+                Paragraph("Supplier", styles["table_header"]),
+                Paragraph("Total", styles["table_header_right"]),
+            ]
+        ]
+
+        for purchase in purchases:
+            purchase_rows.append(
+                [
+                    Paragraph(
+                        self._safe_text(
+                            format_date_indonesia(purchase.get("date"))
+                        ),
+                        styles["table_cell"],
+                    ),
+                    Paragraph(
+                        self._safe_text(
+                            purchase.get("transaction_number")
+                            or "Transaksi Lama"
+                        ),
+                        styles["table_cell"],
+                    ),
+                    Paragraph(
+                        self._safe_text(
+                            purchase.get("supplier_name")
+                            or "Tidak ada supplier"
+                        ),
+                        styles["table_cell"],
+                    ),
+                    Paragraph(
+                        self._safe_text(
+                            self._money(purchase.get("total_amount"))
+                        ),
+                        styles["table_cell_right"],
+                    ),
+                ]
+            )
+
+        purchase_grid = self._grid_style(zebra=bool(purchases))
+
+        if not purchases:
+            purchase_rows.append(
+                [
+                    Paragraph(
+                        "Tidak ada pembelian pada bulan ini.",
+                        styles["table_cell"],
+                    ),
+                    "",
+                    "",
+                    "",
+                ]
+            )
+            purchase_grid.add("SPAN", (0, 1), (-1, 1))
+
+        purchase_table = Table(
+            purchase_rows,
+            colWidths=PURCHASE_REPORT_COLUMNS,
+            repeatRows=1,
+            hAlign="LEFT",
+        )
+        purchase_table.setStyle(purchase_grid)
+
+        elements.append(purchase_table)
+
+        elements.extend(
+            self._build_item_details_sections(
+                purchases,
+                styles,
+                "Rincian Barang Pembelian per Transaksi",
+                price_title="Harga Beli",
+                subtitle_key="supplier_name",
+            )
+        )
 
         return elements
 

@@ -33,13 +33,18 @@ class StatCard(ctk.CTkFrame):
     def __init__(self, master, title: str, subtitle: str = ""):
         super().__init__(master, **_card_kwargs())
 
-        ctk.CTkLabel(
+        self.title_label = ctk.CTkLabel(
             self,
             text=title,
             font=get_font("small"),
             text_color=COLORS["text_secondary"],
             anchor="w",
-        ).pack(anchor="w", padx=SPACING["lg"], pady=(SPACING["lg"], SPACING["xs"]))
+        )
+        self.title_label.pack(
+            anchor="w",
+            padx=SPACING["lg"],
+            pady=(SPACING["lg"], SPACING["xs"]),
+        )
 
         self.value_label = ctk.CTkLabel(
             self,
@@ -72,6 +77,9 @@ class StatCard(ctk.CTkFrame):
             text=text,
             text_color=color or COLORS["text"],
         )
+
+    def set_title(self, text: str):
+        self.title_label.configure(text=text)
 
 
 class StatRow(ctk.CTkFrame):

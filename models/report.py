@@ -1,10 +1,6 @@
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
-from reportlab.pdfgen import canvas
 from models.settings import SettingsModel
 from database.database import Database
-from utils.formatter import format_rupiah, format_date_indonesia, BULAN_INDONESIA
 
 
 class ReportModel:
@@ -20,9 +16,15 @@ class ReportModel:
             year, month,
             total_debt_month, total_payment_month,
             count_debt_transactions, count_payment_transactions,
+            total_purchase_month, count_purchase_month,
+            total_purchase_items_month,
             current_outstanding_balance,   # saldo saat ini, SEMUA waktu
-            details: list of {date, customer_name, type, amount, notes}
+            details: list of {transaction_id, transaction_number, date,
+                     customer_name, type, amount, notes, items}
                      (hanya aktivitas BULAN INI, urut tanggal naik)
+            purchases: list of {id, transaction_id, transaction_number,
+                     date, supplier_name, total_amount, amount, notes,
+                     items} (hanya pembelian BULAN INI)
         """
         month_str = f"{int(year):04d}-{int(month):02d}"
 
@@ -39,21 +41,59 @@ class ReportModel:
                 (month_str,),
             ).fetchone()
 
+            purchase_summary = conn.execute(
+                "SELECT COALESCE(SUM(total_amount), 0) AS total, COUNT(*) AS cnt "
+                "FROM purchases WHERE strftime('%Y-%m', transaction_date) = ?;",
+                (month_str,),
+            ).fetchone()
+
             debt_rows = conn.execute(
-                "SELECT dt.transaction_date AS date, c.name AS customer_name, "
+                "SELECT dt.id AS transaction_id, dt.transaction_number, "
+                "dt.transaction_date AS date, c.name AS customer_name, "
                 "dt.total_amount AS amount, dt.notes "
                 "FROM debt_transactions dt JOIN customers c ON c.id = dt.customer_id "
                 "WHERE strftime('%Y-%m', dt.transaction_date) = ? "
-                "ORDER BY dt.transaction_date ASC;",
+                "ORDER BY dt.transaction_date ASC, dt.id ASC;",
+                (month_str,),
+            ).fetchall()
+
+            debt_item_rows = conn.execute(
+                "SELECT dd.transaction_id, dd.product_id, dd.product_name, "
+                "dd.quantity, dd.price, dd.subtotal "
+                "FROM debt_details dd "
+                "JOIN debt_transactions dt ON dt.id = dd.transaction_id "
+                "WHERE strftime('%Y-%m', dt.transaction_date) = ? "
+                "ORDER BY dd.transaction_id ASC, dd.id ASC;",
                 (month_str,),
             ).fetchall()
 
             payment_rows = conn.execute(
-                "SELECT p.payment_date AS date, c.name AS customer_name, "
+                "SELECT p.id AS transaction_id, NULL AS transaction_number, "
+                "p.payment_date AS date, c.name AS customer_name, "
                 "p.amount AS amount, p.notes "
                 "FROM payments p JOIN customers c ON c.id = p.customer_id "
                 "WHERE strftime('%Y-%m', p.payment_date) = ? "
-                "ORDER BY p.payment_date ASC;",
+                "ORDER BY p.payment_date ASC, p.id ASC;",
+                (month_str,),
+            ).fetchall()
+
+            purchase_rows = conn.execute(
+                "SELECT p.id, p.transaction_number, p.transaction_date AS date, "
+                "s.name AS supplier_name, p.total_amount, p.notes "
+                "FROM purchases p "
+                "LEFT JOIN suppliers s ON s.id = p.supplier_id "
+                "WHERE strftime('%Y-%m', p.transaction_date) = ? "
+                "ORDER BY p.transaction_date ASC, p.id ASC;",
+                (month_str,),
+            ).fetchall()
+
+            purchase_item_rows = conn.execute(
+                "SELECT pd.purchase_id, pd.product_id, pd.product_name, "
+                "pd.quantity, pd.price, pd.subtotal "
+                "FROM purchase_details pd "
+                "JOIN purchases p ON p.id = pd.purchase_id "
+                "WHERE strftime('%Y-%m', p.transaction_date) = ? "
+                "ORDER BY pd.purchase_id ASC, pd.id ASC;",
                 (month_str,),
             ).fetchall()
 
@@ -67,18 +107,63 @@ class ReportModel:
                 "SELECT COALESCE(SUM(amount), 0) AS total FROM payments;"
             ).fetchone()["total"]
 
+        def group_items(rows, key):
+            grouped = {}
+
+            for row in rows:
+                grouped.setdefault(row[key], []).append(
+                    {
+                        "product_id": row["product_id"],
+                        "product_name": row["product_name"],
+                        "quantity": row["quantity"],
+                        "price": row["price"],
+                        "subtotal": row["subtotal"],
+                    }
+                )
+
+            return grouped
+
+        debt_items = group_items(debt_item_rows, "transaction_id")
+        purchase_items = group_items(purchase_item_rows, "purchase_id")
+
         details = []
         for row in debt_rows:
             details.append({
+                "transaction_id": row["transaction_id"],
+                "transaction_number": row["transaction_number"],
                 "date": row["date"], "customer_name": row["customer_name"],
                 "type": "Hutang", "amount": row["amount"], "notes": row["notes"],
+                "items": debt_items.get(row["transaction_id"], []),
             })
         for row in payment_rows:
             details.append({
+                "transaction_id": row["transaction_id"],
+                "transaction_number": row["transaction_number"],
                 "date": row["date"], "customer_name": row["customer_name"],
                 "type": "Pembayaran", "amount": row["amount"], "notes": row["notes"],
+                "items": [],
             })
         details.sort(key=lambda item: item["date"])
+
+        purchases = []
+        for row in purchase_rows:
+            purchases.append({
+                "id": row["id"],
+                "transaction_id": row["id"],
+                "transaction_number": row["transaction_number"],
+                "date": row["date"],
+                "supplier_name": row["supplier_name"],
+                "total_amount": row["total_amount"],
+                "amount": row["total_amount"],
+                "notes": row["notes"],
+                "items": purchase_items.get(row["id"], []),
+            })
+
+        total_purchase_items = sum(
+            item["quantity"]
+            for purchase in purchases
+            for item in purchase["items"]
+        )
 
         return {
             "year": int(year),
@@ -87,8 +172,12 @@ class ReportModel:
             "total_payment_month": payment_summary["total"],
             "count_debt_transactions": debt_summary["cnt"],
             "count_payment_transactions": payment_summary["cnt"],
+            "total_purchase_month": purchase_summary["total"],
+            "count_purchase_month": purchase_summary["cnt"],
+            "total_purchase_items_month": total_purchase_items,
             "current_outstanding_balance": global_debt - global_paid,
             "details": details,
+            "purchases": purchases,
         }
     # ------------------------------------------------------------------
     # Data dashboard
@@ -256,103 +345,32 @@ class ReportModel:
             "recent_transactions": recent_transactions[:10],
         }
     # ------------------------------------------------------------------
-    # Export PDF (ringan - teks biasa, tanpa grafik/gambar)
+    # Export PDF
     # ------------------------------------------------------------------
     def export_to_pdf(
-    self,
-    report: dict,
-    output_path: str,
-    store_name: str = None,
-):
+        self,
+        report: dict,
+        output_path: str,
+        store_name: str = None,
+    ):
+        """
+        Cetak laporan bulanan.
+
+        Didelegasikan ke `Printer` agar tampilan konsisten dengan
+        dokumen lain (riwayat pelanggan, nota). `store_name` tetap
+        diselesaikan dari database milik model ini agar pengujian
+        dengan database temp tidak membaca settings produksi.
+        """
         if not store_name:
             try:
                 store_name = SettingsModel(self.db).get_nama_warung()
             except Exception:
                 store_name = "Warung Hutang"
-        page_width, page_height = A4
-        margin_left = 2 * cm
-        margin_top = page_height - 2 * cm
-        bottom_limit = 2 * cm
 
-        c = canvas.Canvas(output_path, pagesize=A4)
-        y = [margin_top]  # list agar bisa diubah dari nested function (workaround nonlocal-like)
+        from utils.printer import Printer
 
-        def draw_page_header():
-            c.setFont("Helvetica-Bold", 16)
-            c.drawString(margin_left, y[0], store_name)
-            y[0] -= 0.8 * cm
-            c.setFont("Helvetica", 11)
-            period_text = f"Laporan Bulanan - {BULAN_INDONESIA[report['month'] - 1]} {report['year']}"
-            c.drawString(margin_left, y[0], period_text)
-            y[0] -= 1.0 * cm
-
-        def draw_summary():
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(margin_left, y[0], "Ringkasan Bulan Ini")
-            y[0] -= 0.7 * cm
-            c.setFont("Helvetica", 10.5)
-
-            lines = [
-                f"Total Hutang Bulan Ini      : {format_rupiah(report['total_debt_month'])}",
-                f"Total Pembayaran Bulan Ini  : {format_rupiah(report['total_payment_month'])}",
-                f"Jumlah Transaksi Hutang     : {report['count_debt_transactions']}",
-                f"Jumlah Transaksi Pembayaran : {report['count_payment_transactions']}",
-            ]
-            for line in lines:
-                c.drawString(margin_left, y[0], line)
-                y[0] -= 0.55 * cm
-
-            y[0] -= 0.2 * cm
-            c.setFont("Helvetica-Oblique", 9.5)
-            c.drawString(
-                margin_left, y[0],
-                "Catatan: angka di atas hanya aktivitas bulan ini, bukan sisa hutang berjalan.",
-            )
-            y[0] -= 0.5 * cm
-            c.setFont("Helvetica-Bold", 10.5)
-            c.drawString(
-                margin_left, y[0],
-                f"Saldo Saat Ini (Seluruh Pelanggan): {format_rupiah(report['current_outstanding_balance'])}",
-            )
-            y[0] -= 1.0 * cm
-
-        def draw_table_header():
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(margin_left, y[0], "Tanggal")
-            c.drawString(margin_left + 3.5 * cm, y[0], "Pelanggan")
-            c.drawString(margin_left + 9.5 * cm, y[0], "Jenis")
-            c.drawString(margin_left + 12.5 * cm, y[0], "Nominal")
-            y[0] -= 0.15 * cm
-            c.line(margin_left, y[0], page_width - margin_left, y[0])
-            y[0] -= 0.45 * cm
-            c.setFont("Helvetica", 9.5)
-
-        def ensure_space(min_space=0.6 * cm):
-            if y[0] < bottom_limit + min_space:
-                c.showPage()
-                y[0] = margin_top
-                draw_table_header()
-
-        draw_page_header()
-        draw_summary()
-
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(margin_left, y[0], "Detail Transaksi Bulan Ini")
-        y[0] -= 0.7 * cm
-
-        draw_table_header()
-
-        if not report["details"]:
-            c.drawString(margin_left, y[0], "Tidak ada transaksi pada bulan ini.")
-            y[0] -= 0.5 * cm
-        else:
-            for item in report["details"]:
-                ensure_space()
-                c.drawString(margin_left, y[0], format_date_indonesia(item["date"]))
-                c.drawString(margin_left + 3.5 * cm, y[0], (item["customer_name"] or "-")[:22])
-                c.drawString(margin_left + 9.5 * cm, y[0], item["type"])
-                c.drawString(margin_left + 12.5 * cm, y[0], format_rupiah(item["amount"]))
-                y[0] -= 0.5 * cm
-
-        c.save()
-        return output_path
+        return Printer(store_name=store_name).create_pdf(
+            "monthly_report",
+            report,
+            output_path=output_path,
+        )
