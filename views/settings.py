@@ -6,9 +6,16 @@ from components.cards import SectionCard
 from components.dialogs import ConfirmDialog, show_error, show_success
 from components.forms import ErrorText, FormField
 from components.page_header import PageHeader
+from database.integrity import DatabaseValidationError, inspect_database
 from models.settings import SettingsModel, DEFAULT_NAMA_WARUNG
 from models.user import UserModel
-from utils.backup import backup_database, restore_database
+from utils.backup import (
+    BackupError,
+    RestoreError,
+    backup_database,
+    restore_database,
+    validate_backup_file,
+)
 from utils.theme import COLORS, LAYOUT, SPACING, button_style, get_font
 
 APP_VERSION = "1.0.0"
@@ -28,6 +35,7 @@ class SettingsPage(ctk.CTkFrame):
         user_model: UserModel,
         db_path_getter,
         on_username_changed=None,
+        on_restore_complete=None,
     ):
         super().__init__(master, fg_color="transparent")
 
@@ -36,6 +44,7 @@ class SettingsPage(ctk.CTkFrame):
         self.user_model = user_model
         self.db_path_getter = db_path_getter
         self.on_username_changed = on_username_changed
+        self.on_restore_complete = on_restore_complete
 
         self._build_ui()
 
@@ -367,39 +376,114 @@ class SettingsPage(ctk.CTkFrame):
     def _handle_backup(self):
         try:
             backup_path = backup_database(self.db_path_getter())
-        except Exception:
+        except BackupError as exc:
             show_error(
                 self,
                 "Backup Gagal",
-                "Terjadi kesalahan saat membuat backup. Coba lagi.",
+                "Backup database tidak dibuat.\n\n"
+                f"{exc}\n\n"
+                "Backup lama tidak dihapus.",
             )
             return
+        except Exception as exc:
+            show_error(
+                self,
+                "Backup Gagal",
+                "Terjadi kesalahan saat membuat backup.\n\n"
+                f"Detail: {exc}\n\n"
+                "Backup lama tidak dihapus.",
+            )
+            return
+
+        try:
+            info = inspect_database(backup_path)
+            summary = (
+                f"Versi schema: v{info.schema_version}\n"
+                f"Pelanggan: {info.counts.get('customers', 0)}\n"
+                f"Produk: {info.counts.get('products', 0)}\n"
+                f"Transaksi hutang: "
+                f"{info.counts.get('debt_transactions', 0)}\n"
+                f"Pembayaran: {info.counts.get('payments', 0)}\n"
+                f"Pembelian: {info.counts.get('purchases', 0)}\n"
+                f"Penjualan: {info.counts.get('sales', 0)}"
+            )
+        except Exception:
+            summary = "Backup sudah lolos validasi."
 
         show_success(
             self,
             "Backup Berhasil",
-            f"Database berhasil dibackup ke:\n{backup_path}",
+            "Database berhasil dibackup dan diverifikasi ke:\n"
+            f"{backup_path}\n\n"
+            f"{summary}\n\n"
+            "Backup lama tidak dihapus.",
         )
 
     def _handle_restore(self):
         chosen_path = filedialog.askopenfilename(
             title="Pilih File Backup",
-            filetypes=[("Database SQLite", "*.db")],
+            filetypes=[
+                ("Database SQLite", "*.db"),
+                ("Semua file", "*.*"),
+            ],
         )
 
         if not chosen_path:
             return  # dibatalkan
 
+        try:
+            info = validate_backup_file(chosen_path)
+        except DatabaseValidationError as exc:
+            show_error(
+                self,
+                "Backup Tidak Valid",
+                "File backup tidak bisa dipakai. Database saat ini "
+                "tidak diubah.\n\n"
+                f"{exc}",
+            )
+            return
+        except Exception as exc:
+            show_error(
+                self,
+                "Backup Tidak Valid",
+                "File backup tidak bisa diperiksa. Database saat ini "
+                "tidak diubah.\n\n"
+                f"Detail: {exc}",
+            )
+            return
+
+        summary_lines = [
+            f"Versi schema: v{info.schema_version}",
+            f"Pelanggan: {info.counts.get('customers', 0)}",
+            f"Produk: {info.counts.get('products', 0)}",
+            "Transaksi hutang: "
+            f"{info.counts.get('debt_transactions', 0)}",
+            f"Pembayaran: {info.counts.get('payments', 0)}",
+            f"Pembelian: {info.counts.get('purchases', 0)}",
+            f"Penjualan: {info.counts.get('sales', 0)}",
+        ]
+
+        message = (
+            "Restore akan mengganti seluruh data saat ini dengan isi "
+            "file backup yang dipilih.\n\n"
+            "Ringkasan backup:\n"
+            + "\n".join(summary_lines)
+        )
+
+        if info.warnings:
+            message += "\n\nCatatan:\n" + "\n".join(
+                f"- {warning}" for warning in info.warnings[:5]
+            )
+
+        message += (
+            "\n\nDatabase saat ini akan diamankan otomatis terlebih "
+            "dahulu. Lanjutkan restore?"
+        )
+
         ConfirmDialog(
             self,
             title="Konfirmasi Restore",
-            message=(
-                "Restore akan mengganti seluruh data saat ini dengan "
-                "isi file backup yang dipilih.\n\n"
-                "Data saat ini akan diamankan otomatis terlebih dahulu, "
-                "tetapi lanjutkan hanya jika Anda yakin.\n\n"
-                "Lanjutkan restore?"
-            ),
+            message=message,
             on_confirm=lambda: self._do_restore(chosen_path),
             confirm_text="Restore",
         )
@@ -410,44 +494,64 @@ class SettingsPage(ctk.CTkFrame):
                 chosen_path,
                 self.db_path_getter(),
             )
-        except Exception:
-            show_error(
-                self,
-                "Restore Gagal",
-                "Terjadi kesalahan saat melakukan restore. Coba lagi.",
+        except RestoreError as exc:
+            message = (
+                "Restore gagal atau dibatalkan. Database produksi "
+                "dipertahankan/dikembalikan.\n\n"
+                f"{exc}"
             )
+            if exc.safety_path and exc.safety_path not in str(exc):
+                message += (
+                    "\n\nSafety backup:\n"
+                    f"{exc.safety_path}"
+                )
+            show_error(self, "Restore Gagal", message)
             return
-
-        # Backup lama bisa berstruktur lebih tua dari aplikasi ini. Naikkan ke
-        # versi terbaru sekarang, agar halaman tidak error sampai aplikasi
-        # dibuka ulang.
-        try:
-            self.settings_model.db.initialize()
         except Exception as exc:
             show_error(
                 self,
-                "Restore Perlu Perhatian",
-                "Database berhasil dipulihkan, tetapi gagal diperbarui "
-                "ke versi terbaru.\n\n"
-                "Tutup lalu buka kembali aplikasi. Jika masih gagal, "
-                "kirim pesan ini ke pengembang.\n\n"
+                "Restore Gagal",
+                "Terjadi kesalahan saat melakukan restore.\n\n"
                 f"Detail: {exc}",
             )
             return
 
-        note = (
-            f"\n\nData sebelumnya diamankan ke:\n{safety_path}"
-            if safety_path
-            else ""
+        try:
+            info = inspect_database(self.db_path_getter())
+            summary = (
+                f"Versi schema: v{info.schema_version}\n"
+                f"Pelanggan: {info.counts.get('customers', 0)}\n"
+                f"Produk: {info.counts.get('products', 0)}\n"
+                f"Transaksi hutang: "
+                f"{info.counts.get('debt_transactions', 0)}\n"
+                f"Pembayaran: {info.counts.get('payments', 0)}\n"
+                f"Pembelian: {info.counts.get('purchases', 0)}\n"
+                f"Penjualan: {info.counts.get('sales', 0)}"
+            )
+        except Exception:
+            summary = "Database sudah diverifikasi setelah restore."
+
+        message = (
+            "Database berhasil dipulihkan dan diverifikasi.\n\n"
+            f"{summary}"
+        )
+
+        if safety_path:
+            message += (
+                "\n\nSafety backup data sebelumnya:\n"
+                f"{safety_path}"
+            )
+
+        message += (
+            "\n\nAnda akan diarahkan ke halaman login agar semua data "
+            "dimuat ulang."
         )
 
         show_success(
             self,
             "Restore Berhasil",
-            "Database berhasil dipulihkan dari file backup."
-            + note
-            + "\n\nDisarankan logout lalu login kembali agar "
-            "tampilan sinkron.",
+            message,
+            on_close=self.on_restore_complete,
         )
 
     # ------------------------------------------------------------------

@@ -358,7 +358,6 @@ class ProductsPage(ctk.CTkFrame):
                 opening_stock=data["opening_stock"],
                 barcode=data["barcode"],
                 supplier_id=None,
-                image_path="",
             )
 
             if (
@@ -453,8 +452,6 @@ class ProductsPage(ctk.CTkFrame):
                 selling_price=data["selling_price"],
                 barcode=data["barcode"],
                 supplier_id=None,
-                # Gambar tidak lagi diubah dari UI; data lama dibiarkan utuh.
-                image_path=old_product.get("image_path") or "",
             )
 
             if isinstance(result, tuple):

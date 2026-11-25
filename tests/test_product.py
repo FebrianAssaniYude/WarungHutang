@@ -52,7 +52,6 @@ class TestProductModel(unittest.TestCase):
             opening_stock=stock,
             barcode=barcode,
             supplier_id=supplier_id,
-            image_path="data/images/product_test.jpg",
         )
 
         self.assertTrue(success, message)
@@ -87,11 +86,6 @@ class TestProductModel(unittest.TestCase):
         self.assertEqual(
             product["supplier_name"],
             "Supplier Test",
-        )
-
-        self.assertEqual(
-            product["image_path"],
-            "data/images/product_test.jpg",
         )
 
     def test_add_product_without_barcode(self):
@@ -248,7 +242,6 @@ class TestProductModel(unittest.TestCase):
             selling_price=3500,
             barcode="899999999999",
             supplier_id=supplier_id,
-            image_path="data/images/updated.jpg",
         )
 
         self.assertTrue(success, message)
@@ -270,10 +263,6 @@ class TestProductModel(unittest.TestCase):
         self.assertEqual(
             product["barcode"],
             "899999999999",
-        )
-        self.assertEqual(
-            product["image_path"],
-            "data/images/updated.jpg",
         )
 
         # Stok tidak boleh berubah saat edit master produk.

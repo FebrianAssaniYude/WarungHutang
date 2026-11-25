@@ -1,0 +1,544 @@
+PROJECT: Warung Hutang
+LAST UPDATED: 2026-11-26 04:53:44 +07:00
+CURRENT PHASE: Phase 2 - Riwayat Pelanggan & Detail Barang pada PDF (Implemented)
+OVERALL STATUS: Phase 2 implemented and verified; waiting for review + commit
+
+==============================================================================
+A. PROJECT OVERVIEW
+==============================================================================
+
+Teknologi dan arsitektur aktual:
+- Python 3.14.7 di lingkungan pengembangan Windows.
+- Aplikasi desktop offline, satu PC, tanpa server/internet/cloud.
+- UI: CustomTkinter 5.2.2 (Tkinter).
+- Database: SQLite melalui modul standar `sqlite3`.
+- PDF: reportlab 4.2.5.
+- Password: bcrypt 4.2.0.
+- Packaging: PyInstaller (requirements-dev.txt), mode "onedir" melalui
+  `build.spec` dan `build.bat`.
+
+Entry point dan modul utama:
+- `app.py`: entry point; single-instance lock, pemulihan restore terputus,
+  inisialisasi database, alur login -> main window -> logout.
+- `database/database.py`: koneksi, transaksi, deteksi versi, migrasi
+  v1 -> v2 -> v3 -> v4, validasi schema, backup migrasi.
+- `database/schema.sql`: definisi tabel.
+- `database/integrity.py`: pemeriksaan read-only (header, integrity_check,
+  foreign_key_check, tabel/kolom, hitungan, digest isi).
+- `models/`: user, customer, product, debt, payment, purchase, sale,
+  history, report, settings, supplier.
+- `views/`: login, main_window, dashboard, customers, products, debts,
+  payments, purchases, sales, history, reports, settings.
+- `components/`: dialog, form, tabel, kartu, badge, detail dialog.
+- `utils/`: backup, printer, security, formatter, barcode, theme,
+  error_handler, instance_lock.
+
+Lokasi database dan mekanisme penyimpanan:
+- `data/warung.db` relatif terhadap folder aplikasi.
+- `get_database_path()` membuat folder `data/` bila belum ada.
+- Saat frozen (PyInstaller), folder dasar adalah folder EXE, bukan
+  folder `_internal`.
+- Database aktif saat audit: schema v4, `integrity_check=ok`,
+  `foreign_key_check=0`, ukuran 208.896 byte, `journal_mode=delete`.
+- Tidak ada perubahan schema, lokasi database, atau nama EXE yang
+  diizinkan tanpa keputusan eksplisit.
+
+Sistem backup/restore:
+- Backup memakai SQLite Backup API, lalu divalidasi (integritas, FK,
+  schema, jumlah/total data, digest isi) sebelum dianggap berhasil.
+- Restore memakai staging di `data/.restore_work/`, migrasi hanya pada
+  salinan staging, safety backup terverifikasi, swap atomik, verifikasi
+  pasca-restore, rollback bila gagal.
+- Marker `data/.restore_state.json` dipakai untuk pemulihan otomatis
+  saat startup bila restore terputus.
+- Safety backup `data/backup/before_restore_*.db` dan backup lama tidak
+  dihapus otomatis.
+- Hanya satu instance aplikasi yang diizinkan (`data/.warung.lock`).
+
+Sistem pengujian dan packaging EXE:
+- `python -m pytest -q`: 175 test otomatis (per 2026-11-26), tanpa
+  warning.
+- `python tests/test_integration.py`: skrip end-to-end manual; sengaja
+  tidak dikoleksi pytest karena seluruh alur berjalan saat diimpor.
+- `tests/test_customer_history_pdf.py`: test khusus data `items` dan
+  isi PDF `customer_history` (memeriksa teks flowable, bukan parsing
+  PDF terkompresi).
+- `build.spec` + `build.bat` tersedia; folder `build/` dan `dist/` ada,
+  tetapi smoke test EXE hasil build belum diverifikasi ulang pada sesi
+  ini.
+
+==============================================================================
+B. ROADMAP
+==============================================================================
+
+Phase 1: Backup, restore, dan kompatibilitas database.
+- Status: VERIFIED
+- Backup/restore terverifikasi, staging, safety backup, rollback, dan
+  pemulihan setelah crash sudah diuji. Kompatibilitas v1-v3 sebagai
+  kandidat restore diuji pada salinan staging.
+- Catatan: perubahan implementasi Phase 1 masih belum di-commit.
+
+Phase 2: Integritas transaksi dan siklus hutang pelanggan.
+- Status: IMPLEMENTED - VERIFIED, menunggu review + commit.
+- PDF "Cetak Riwayat" pada detail pelanggan sekarang menampilkan
+  rincian barang (nama, qty, harga, subtotal) per transaksi hutang.
+- Implementasi tanpa perubahan schema, lokasi database, atau nama EXE.
+
+Phase 3: Konsistensi UI/UX.
+- Status: NOT STARTED
+- Termasuk konsistensi dialog, tabel, pesan error, dan alur navigasi.
+
+Phase 4: Optimasi, pengujian regresi, dan stabilitas EXE.
+- Status: NOT STARTED
+- Termasuk smoke test EXE, pengujian UI manual, dan regresi menyeluruh.
+
+==============================================================================
+C. FINDINGS AND OPTIMIZATION BACKLOG
+==============================================================================
+
+WH-001 | Backup tidak aman dan tidak terverifikasi
+- Prioritas: P0
+- Modul: utils/backup.py, database/integrity.py
+- Bukti: Sebelum perbaikan, backup hanya menyalin file dan tidak
+  memeriksa integritas/FK/schema/isi.
+- Rekomendasi: SQLite Backup API + validasi + perbandingan digest.
+- Status: VERIFIED
+- Dependensi/risiko: Tidak ada perubahan schema.
+- Kriteria keberhasilan: Backup rusak/tidak konsisten tidak pernah
+  dilaporkan berhasil; backup lama tetap ada.
+
+WH-002 | Restore langsung menimpa database produksi
+- Prioritas: P0
+- Modul: utils/backup.py, views/settings.py
+- Bukti: Sebelum perbaikan, restore menyalin file langsung ke target.
+- Rekomendasi: staging, migrasi hanya di staging, safety backup,
+  swap atomik, verifikasi, rollback.
+- Status: VERIFIED
+- Dependensi/risiko: Kandidat backup v1-v3 harus dimigrasi di staging.
+- Kriteria keberhasilan: Target tidak berubah bila validasi/staging/
+  swap gagal; target kembali ke kondisi sebelumnya bila verifikasi
+  gagal.
+
+WH-003 | Tidak ada pemulihan bila restore terputus
+- Prioritas: P1
+- Modul: utils/backup.py, app.py
+- Bukti: Tidak ada marker/state restore sebelumnya.
+- Rekomendasi: marker `.restore_state.json`, `previous.db`, safety
+  backup, `recover_interrupted_restore()` sebelum `initialize()`.
+- Status: VERIFIED
+- Dependensi/risiko: Marker harus dibersihkan setelah sukses.
+- Kriteria keberhasilan: Crash setelah swap-out/swapped-in dapat
+  dipulihkan ke kondisi valid tanpa membuat database baru.
+
+WH-004 | Backup 0 user / schema lebih baru / file tidak lengkap diterima
+- Prioritas: P1
+- Modul: database/integrity.py, utils/backup.py
+- Bukti: Tidak ada validasi versi, tabel wajib, atau jumlah user.
+- Rekomendasi: Tolak 0 user, schema > v4, tabel/kolom hilang,
+  duplikat nomor transaksi, dan FK violation.
+- Status: VERIFIED
+- Dependensi/risiko: Database legacy v1 tetap diizinkan sebagai
+  kandidat restore dan dimigrasi di staging.
+- Kriteria keberhasilan: Semua kandidat invalid ditolak sebelum target
+  disentuh.
+
+WH-005 | Dua instance aplikasi dapat berjalan bersamaan
+- Prioritas: P1
+- Modul: utils/instance_lock.py, app.py
+- Bukti: Sebelumnya tidak ada lock proses.
+- Rekomendasi: Lock `data/.warung.lock` berbasis msvcrt/flock.
+- Status: VERIFIED
+- Dependensi/risiko: Lock dilepas otomatis oleh OS bila proses mati.
+- Kriteria keberhasilan: Instance kedua menampilkan pesan dan berhenti;
+  instance berikutnya bisa acquire setelah lock dilepas.
+
+WH-006 | Path error.log salah saat aplikasi frozen
+- Prioritas: P2
+- Modul: utils/error_handler.py
+- Bukti: Path dihitung dari lokasi modul, sehingga bisa masuk
+  `_internal` saat PyInstaller.
+- Rekomendasi: Gunakan `get_app_base_dir()` (folder EXE).
+- Status: VERIFIED (inspeksi kode/import; belum diuji pada EXE nyata)
+- Dependensi/risiko: Perlu smoke test EXE untuk verifikasi runtime.
+- Kriteria keberhasilan: `data/error.log` muncul di sebelah EXE.
+
+WH-007 | Fitur gambar produk tidak terpakai dan membingungkan
+- Prioritas: P2
+- Modul: models/product.py, views/products.py, database/database.py
+- Bukti: UI tidak pernah menampilkan gambar; kolom `image_path` hanya
+  menyimpan path lama; folder `data/images` dibuat otomatis.
+- Rekomendasi: Hapus pemakaian gambar di level aplikasi; pertahankan
+  kolom schema dan file lama agar kompatibel.
+- Status: VERIFIED
+- Dependensi/risiko: Database lama masih memiliki nilai `image_path`;
+  nilai tersebut tidak lagi dibaca/ditulis aplikasi.
+- Kriteria keberhasilan: Test produk dan seluruh suite lulus; tidak ada
+  referensi gambar di UI/model.
+
+WH-008 | Database produksi berubah dari kondisi checkpoint (restore)
+- Prioritas: P1
+- Modul: data/warung.db, data/backup/
+- Bukti:
+  - Hash file saat audit: 0F4BE7AF5C8F93E7CEEED31DD99C8C6931C96A0BBFDDC644DF62E9E8B814D237
+  - Checkpoint sesi sebelumnya: C8CDD2211735615C5C4D0ADE6F604A683D076E8C245F28974EBB5F5D64E97CA8
+  - Waktu modifikasi database: 2026-10-27 16:28:41.
+  - `data/.warung.lock` dibuat 2026-10-27 16:27:39.
+  - Isi aktif saat audit: 9 pelanggan, 11 produk, 13 transaksi hutang,
+    21 pembayaran, 10 pembelian, 13 penjualan, 0 kelompok pelanggan.
+  - Safety backup `before_restore_2026-10-27_162841_786757.db` berisi
+    9 pelanggan, 11 produk, 13 transaksi hutang, 22 pembayaran,
+    11 pembelian, 14 penjualan, 2 kelompok pelanggan; digest isi
+    74acbc7e5c8e62b0203af225396a368db9d8a01892b362abe55f869ef91baff3
+    (cocok dengan digest database produksi sebelum restore pada
+    checkpoint).
+- Kesimpulan: Database produksi tampaknya dipulihkan ke backup
+  `backup_2026-10-04_1427.db` (v3, lalu dimigrasi ke v4) pada
+  2026-10-27 16:28. Data sebelum restore masih tersedia di safety
+  backup. Tindakan ini bukan dilakukan oleh sesi audit ini.
+- Keputusan pengguna (2026-11-26): pertahankan kondisi database aktif
+  sekarang; safety backup tetap disimpan dan tidak dihapus.
+- Status: RESOLVED - keep current DB
+- Dependensi/risiko: Jangan mengubah database produksi tanpa keputusan
+  baru. Pengujian tetap memakai database temp/salinan.
+- Kriteria keberhasilan: Hash/count database final tercatat dan tidak
+  berubah selama pengujian. Terpenuhi: hash tetap
+  0F4BE7AF... selama seluruh pengujian.
+
+WH-009 | PDF Cetak Riwayat belum menampilkan detail barang
+- Prioritas: P1
+- Modul: models/customer.py, utils/printer.py, views/customers.py
+- Bukti awal:
+  - `CustomerModel.get_detail()` hanya mengambil header
+    `debt_transactions` dan `payments`; tidak mengambil `debt_details`.
+  - `Printer._build_customer_history_document()` hanya membuat tabel
+    timeline: Tanggal, Jenis, Keterangan, Nominal, Sisa Hutang.
+  - `CustomerDetailDialog._print_history()` mengirim `timeline` apa
+    adanya, sehingga PDF tidak pernah menerima item barang.
+- Implementasi (disetujui pengguna 2026-11-26):
+  1. `CustomerModel.get_detail()` mengambil seluruh `debt_details`
+     pelanggan dalam satu query JOIN, mengelompokkan per
+     `transaction_id`, dan melampirkan `items` pada setiap entry
+     timeline bertipe "Hutang". Entry Pembayaran mendapat `items: []`.
+  2. `Printer._build_customer_history_items()` menambahkan bagian
+     "Rincian Barang per Transaksi" setelah tabel timeline: nomor +
+     tanggal transaksi, tabel Barang/Qty/Harga/Subtotal, dan total
+     transaksi. Transaksi legacy tanpa item diberi keterangan
+     "Tidak ada rincian barang tersimpan untuk transaksi ini."
+  3. `views/customers.py` tidak diubah karena timeline sudah diteruskan
+     ke printer.
+- Status: VERIFIED
+- Dependensi/risiko:
+  - Tidak mengubah schema atau lokasi database.
+  - `debt_details.product_id` NULL pada data legacy ditangani lewat
+    snapshot `product_name`.
+  - Key `items` bersifat aditif; pemanggil `get_detail()` lain tetap
+    kompatibel.
+- Kriteria keberhasilan: PDF menampilkan nama barang, qty, harga, dan
+  subtotal untuk setiap transaksi hutang; test lulus; database
+  produksi tidak berubah. Terpenuhi.
+
+WH-010 | Belum ada test otomatis untuk PDF customer_history
+- Prioritas: P2
+- Modul: tests/
+- Bukti awal: `tests/test_integration.py` menguji PDF sale, purchase,
+  debt, payment, dan monthly report; tidak menguji `customer_history`.
+- Implementasi: `tests/test_customer_history_pdf.py` (6 test) mencakup:
+  items pada `get_detail()`, transaksi legacy tanpa item, detail legacy
+  dengan `product_id` NULL, isi teks flowable PDF, keterangan legacy,
+  dan tidak adanya bagian rincian bila tidak ada hutang.
+- Status: VERIFIED
+- Dependensi/risiko: Tidak menambah dependency PDF parser; teks
+  diperiksa dari flowable reportlab.
+- Kriteria keberhasilan: Test gagal bila detail barang hilang dari PDF.
+
+WH-011 | Test PDF hanya memeriksa file ada dan ukuran > 0
+- Prioritas: P2
+- Modul: tests/test_integration.py, tests/test_customer_history_pdf.py
+- Bukti awal: Pemeriksaan `os.path.exists()` dan
+  `os.path.getsize() > 0`.
+- Implementasi:
+  - Test unit mengumpulkan teks dari Paragraph/Table flowable dan
+    memastikan nama barang, subtotal, total, dan judul bagian muncul.
+  - `tests/test_integration.py` sekarang membuat PDF `customer_history`
+    dan memeriksa bahwa timeline pelanggan memuat rincian barang.
+- Status: VERIFIED
+- Dependensi/risiko: Pemeriksaan isi dilakukan pada flowable, bukan
+  PDF terkompresi; cukup untuk regresi konten.
+- Kriteria keberhasilan: Regresi konten PDF (mis. nama barang hilang)
+  terdeteksi otomatis.
+
+WH-012 | File lock `.warung.lock` tidak di-ignore
+- Prioritas: P3
+- Modul: .gitignore, data/.warung.lock
+- Bukti: `git status` menampilkan `?? data/.warung.lock`.
+- Implementasi: `.gitignore` ditambah `data/.warung.lock`,
+  `data/.restore_state.json`, dan `data/.restore_work/`.
+- Status: VERIFIED
+- Dependensi/risiko: Tidak ada.
+- Kriteria keberhasilan: File lock tidak muncul sebagai untracked.
+  Terpenuhi.
+
+WH-013 | Warning pytest dari test_migration
+- Prioritas: P3
+- Modul: tests/test_migration.py
+- Bukti: Dua test mengembalikan bool sehingga memicu
+  `PytestReturnNotNoneWarning`.
+- Implementasi: fungsi runner diganti nama menjadi `run_v1_to_v2` dan
+  `run_existing_v2_database` (dipakai `main()`), lalu ditambah pembungkus
+  pytest `test_v1_to_v2` dan `test_existing_v2_database` berbasis
+  `assert`.
+- Status: VERIFIED
+- Dependensi/risiko: Mode skrip `python tests/test_migration.py` tetap
+  berfungsi.
+- Kriteria keberhasilan: `pytest -q` tanpa warning tersebut.
+  Terpenuhi: 175 passed tanpa warning.
+
+WH-014 | Schema drift pada database hasil migrasi lama
+- Prioritas: P2
+- Modul: database/database.py, database/integrity.py
+- Bukti: Database hasil migrasi lama tidak memiliki FK
+  `products.supplier_id`; keunikan `debt_transactions` memakai partial
+  index. Validasi memakai capability check + `foreign_key_check`, bukan
+  perbandingan DDL persis.
+- Rekomendasi: Defer normalisasi schema; pertahankan validasi berbasis
+  kemampuan sampai ada keputusan migrasi khusus.
+- Status: DEFERRED (disetujui sebelumnya)
+- Dependensi/risiko: Perubahan schema berisiko pada data lama.
+- Kriteria keberhasilan: Semua database v1-v4 tetap lolos validasi dan
+  restore staging.
+
+WH-015 | File gambar lama masih ada di `data/images/`
+- Prioritas: P3
+- Modul: data/images/
+- Bukti: Folder masih ada; fitur gambar sudah dihapus dari aplikasi.
+- Rekomendasi: Pertahankan file lama (tidak dihapus) sampai pengguna
+  memutuskan; backup tetap DB-only.
+- Status: VERIFIED (keputusan: tidak dihapus)
+- Dependensi/risiko: Tidak memengaruhi database/backup.
+- Kriteria keberhasilan: Tidak ada referensi aplikasi ke folder
+  tersebut; file lama tetap utuh.
+
+WH-016 | Alur UI restore -> dialog sukses -> logout belum diuji manual
+- Prioritas: P2
+- Modul: views/settings.py, components/dialogs.py, views/main_window.py
+- Bukti: Callback `on_restore_complete` dan `MessageDialog.destroy`
+  sudah diinspeksi, tetapi belum ada test UI/klik nyata.
+- Rekomendasi: Smoke test manual di lingkungan GUI: restore dari
+  salinan backup, pastikan dialog sukses muncul, lalu aplikasi kembali
+  ke login.
+- Status: OPEN
+- Dependensi/risiko: Memerlukan sesi GUI; jangan memakai database
+  produksi sebagai target uji.
+- Kriteria keberhasilan: Logout otomatis terjadi setelah dialog ditutup
+  (tombol OK, Esc, atau X).
+
+WH-017 | Perubahan Phase 1 + Phase 2 belum di-commit
+- Prioritas: P3
+- Modul: git working tree
+- Bukti: 15 file modified + 6 file untracked (termasuk progress.txt dan
+  test baru).
+- Rekomendasi: Review diff, lalu commit setelah pengguna menyetujui.
+- Status: OPEN
+- Dependensi/risiko: Perubahan bisa hilang jika working tree tidak
+  sengaja direset.
+- Kriteria keberhasilan: Commit berisi perubahan Phase 1, Phase 2, dan
+  test terkait.
+
+==============================================================================
+D. COMPLETED WORK
+==============================================================================
+
+2026-10-27 - Backup/restore safety (Phase 1)
+- `database/integrity.py` (baru): pemeriksaan read-only, schema
+  requirement, counts/sums, duplikat nomor transaksi, digest isi,
+  `sqlite_backup()`.
+- `utils/backup.py`: backup terverifikasi, restore staging, migrasi
+  staging, safety backup, marker, rollback, recovery.
+- `database/database.py`: `initialize(run_bootstrap=True)`, backup
+  migrasi terverifikasi, `_ensure_image_directory` dihapus.
+- `utils/instance_lock.py` (baru) + `app.py`: single-instance lock dan
+  recovery sebelum initialize.
+- `utils/error_handler.py`: path log frozen diperbaiki.
+- `views/settings.py`, `components/dialogs.py`, `views/main_window.py`:
+  prevalidasi restore, ringkasan, detail error, safety path, logout
+  otomatis.
+- `tests/conftest.py`, `tests/test_backup_restore.py` (22 test).
+- `README.md`: dokumentasi backup/restore.
+- Bukti: `pytest -q` 169 passed; `test_integration.py` 74 PASS / 0 FAIL;
+  hash database produksi tidak berubah oleh pengujian.
+
+2026-10-27 - Penghapusan fitur gambar di level aplikasi
+- `models/product.py`: `image_path` dihapus dari SELECT/INSERT/UPDATE.
+- `views/products.py`: argumen `image_path` dihapus.
+- `tests/test_product.py`: assertion gambar dihapus.
+- Kolom schema `products.image_path` dan file lama dipertahankan.
+- Bukti: test produk + backup/restore 42 passed; full suite 169 passed.
+
+2026-11-26 - Audit fitur cetak riwayat pelanggan
+- Audit `CustomerModel.get_detail()`, `Printer._build_customer_history_
+  document()`, `CustomerDetailDialog._print_history()`, dan test terkait.
+- Ditemukan WH-009 (detail barang belum ada di PDF) dan WH-010/WH-011
+  (celah pengujian PDF).
+- Audit kondisi database produksi; ditemukan WH-008 (database berubah
+  karena restore 2026-10-27 16:28; safety backup tersedia).
+- Menjalankan ulang seluruh test: 169 passed; integration 74 PASS.
+- Tidak ada perubahan kode aplikasi pada sesi audit ini.
+- File baru: `progress.txt`.
+
+2026-11-26 - Implementasi detail barang pada PDF riwayat pelanggan
+- `models/customer.py`:
+  - `get_detail()` mengambil seluruh `debt_details` pelanggan dalam satu
+    query JOIN (tanpa N+1), mengelompokkan per transaksi, dan
+    melampirkan `items` pada entry timeline "Hutang".
+  - Entry "Pembayaran" mendapat `items: []`.
+  - Data legacy dengan `product_id` NULL tetap terbaca lewat snapshot
+    `product_name`.
+- `utils/printer.py`:
+  - `_build_customer_history_document()` memanggil
+    `_build_customer_history_items()` setelah tabel timeline.
+  - Bagian baru "Rincian Barang per Transaksi": referensi transaksi +
+    tanggal, tabel Barang/Qty/Harga/Subtotal, total transaksi, dan
+    keterangan untuk transaksi legacy tanpa rincian.
+  - Memakai ulang `_build_items_table()`, `_money()`, `_escape_text()`,
+    dan style yang sudah ada; tidak mengubah format PDF lain.
+- `tests/test_customer_history_pdf.py` (baru, 6 test): data items,
+  legacy tanpa item, legacy `product_id` NULL, isi teks PDF, keterangan
+  legacy, dan tidak ada bagian rincian bila tidak ada hutang.
+- `tests/test_integration.py`: membuat PDF `customer_history` dan
+  memeriksa timeline memuat rincian barang (76 check).
+- `tests/test_migration.py`: warning pytest dihilangkan dengan
+  memisahkan runner (`run_*`) dan pembungkus test (`assert`).
+- `.gitignore`: menambahkan `data/.warung.lock`,
+  `data/.restore_state.json`, `data/.restore_work/`.
+- Bukti: `pytest -q` 175 passed tanpa warning; integration 76 PASS /
+  0 FAIL; hash database produksi tetap
+  0F4BE7AF5C8F93E7CEEED31DD99C8C6931C96A0BBFDDC644DF62E9E8B814D237.
+- PDF contoh sintetis 12 transaksi + pembayaran + 1 legacy berhasil
+  dibuat 3 halaman (verifikasi page break struktural), disimpan di
+  folder temp, bukan di project.
+
+==============================================================================
+E. TEST RESULTS
+==============================================================================
+
+Perintah dan hasil aktual (2026-11-26):
+1. `python -m pytest -q`
+   - Hasil: PASS
+   - 175 passed, 0 warning, 232.61s.
+2. `python tests/test_integration.py`
+   - Hasil: PASS
+   - 76 PASS / 0 FAIL.
+   - Mencakup login, settings, customer, supplier, product, pembelian,
+     penjualan, hutang, pembayaran, timeline, history, dashboard,
+     laporan bulanan, PDF sale/purchase/debt/payment/customer_history,
+     atomic validation, backup, restore, integritas akhir.
+3. `python -m pytest -q tests/test_migration.py tests/test_customer_history_pdf.py`
+   - Hasil: PASS
+   - 8 passed, 0 warning.
+4. PDF sintetis `customer_history`
+   - Hasil: PASS
+   - 12 transaksi hutang + 6 pembayaran + 1 legacy; 3 halaman;
+     ukuran 7.960 byte; file di folder temp.
+5. `python -m compileall -q ...`
+   - Hasil: PASS (sesi sebelumnya).
+6. Uji `SingleInstanceLock` dengan subprocess
+   - Hasil: PASS (sesi sebelumnya).
+7. `Get-FileHash data/warung.db` sebelum dan sesudah test
+   - Hasil: tidak berubah
+   - Hash: 0F4BE7AF5C8F93E7CEEED31DD99C8C6931C96A0BBFDDC644DF62E9E8B814D237
+   - Ukuran 208.896 byte; mtime 2026-10-27 16:28:41.
+
+Pengujian yang belum dilakukan:
+- Smoke test EXE hasil PyInstaller (startup, login, backup/restore,
+  cetak PDF, error.log di sebelah EXE).
+- Uji klik UI nyata untuk restore -> dialog sukses -> logout.
+- Verifikasi visual PDF riwayat pelanggan dengan data produksi nyata
+  (layout, page break, header halaman kedua) di aplikasi GUI.
+- Uji database produksi sebagai target restore (sengaja tidak
+  dilakukan; hanya salinan/temp).
+
+Risiko regresi yang masih terbuka:
+- Penambahan bagian rincian memperpanjang PDF; page break sudah diuji
+  struktural pada data sintetis, tetapi belum dicek visual dengan data
+  nyata.
+- Data legacy tanpa `debt_details` tetap dapat dicetak (diuji).
+- Perubahan UI/dialog restore belum diuji dengan klik nyata.
+- Perubahan Phase 1 + Phase 2 masih belum di-commit.
+
+==============================================================================
+F. PENDING WORK
+==============================================================================
+
+1. Review diff Phase 1 + Phase 2, lalu commit setelah persetujuan
+   pengguna (WH-017).
+2. Smoke test UI restore/logout (WH-016).
+3. Smoke test EXE dan regresi Phase 4.
+4. Verifikasi visual PDF riwayat pelanggan memakai data nyata di GUI
+   (opsional; data sintetis sudah lolos uji struktural).
+5. Normalisasi schema drift (WH-014) ditunda sampai ada keputusan
+   migrasi khusus.
+
+==============================================================================
+G. DECISION LOG
+==============================================================================
+
+Keputusan yang sudah disetujui:
+- Backup tetap DB-only; gambar produk tidak termasuk backup/restore.
+- Fitur gambar dihapus dari level aplikasi; kolom schema dan file lama
+  dipertahankan (tidak dihapus).
+- Backup lama dan safety backup tidak dihapus otomatis.
+- Restore memakai staging; migrasi v1-v3 hanya pada salinan staging.
+- Backup 0 user, file invalid, dan schema lebih baru dari v4 ditolak.
+- Logout otomatis setelah restore berhasil.
+- Single-instance guard dipertahankan.
+- Schema drift dinormalisasi nanti; validasi memakai capability check
+  dan `foreign_key_check`.
+- Tidak mengubah `schema.sql`, `CURRENT_SCHEMA_VERSION`, nama
+  tabel/kolom, `get_database_path()`, lokasi database, atau nama EXE.
+- Desain PDF riwayat pelanggan (2026-11-26): lampirkan `items` pada
+  entry timeline "Hutang" dan tambahkan bagian "Rincian Barang per
+  Transaksi" setelah tabel timeline. Alternatif kolom tambahan di tabel
+  timeline ditolak karena sempit dan sulit menampilkan harga/subtotal.
+- Transaksi hutang legacy tanpa rincian diberi keterangan eksplisit di
+  PDF, bukan dilewati.
+- Database produksi (WH-008): pertahankan kondisi hasil restore
+  2026-10-27; safety backup tetap disimpan untuk pemulihan di masa
+  depan.
+
+Keputusan yang masih menunggu persetujuan:
+- Kapan dan bagaimana perubahan Phase 1 + Phase 2 di-commit.
+
+Batasan yang harus dipertahankan:
+- Jangan menyentuh database produksi saat pengembangan/pengujian.
+- Jangan menjalankan restore/migrasi destruktif pada database asli.
+- Gunakan salinan/temp untuk semua pengujian.
+- Jangan menyimpan password, secret, atau data pribadi pelanggan di
+  progress.txt.
+
+Catatan historis:
+- Restore produksi 2026-10-27 16:28 bukan tindakan sesi audit ini.
+  Safety backup tersedia dan belum dihapus. Jangan mengubahnya tanpa
+  keputusan pengguna.
+
+==============================================================================
+H. NEXT ACTION
+==============================================================================
+
+Satu langkah berikutnya:
+- Review diff Phase 1 + Phase 2 bersama pengguna, lalu commit jika
+  disetujui (WH-017).
+
+Alasan:
+- Implementasi dan pengujian sudah selesai; belum ada commit sehingga
+  perubahan masih berisiko hilang.
+- Database produksi tidak boleh diubah oleh proses commit/review.
+
+Syarat sebelum melanjutkan:
+- Pengguna menyetujui isi diff (termasuk `tests/test_migration.py` dan
+  `.gitignore`).
+- Commit tidak menyertakan `data/warung.db`, `data/backup/`,
+  `data/.warung.lock`, atau artefak runtime lain.
+
+==============================================================================
+END OF FILE
+==============================================================================

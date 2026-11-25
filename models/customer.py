@@ -396,6 +396,8 @@ class CustomerModel:
         - type
         - amount
         - notes
+        - items: rincian barang untuk Hutang (list; kosong untuk
+          Pembayaran atau transaksi lama tanpa rincian)
 
         transaction_number pembayaran tetap None karena tabel payments
         tidak memiliki nomor transaksi.
@@ -479,11 +481,53 @@ class CustomerModel:
                 (customer_id,),
             ).fetchall()
 
+            # ==========================================================
+            # RINCIAN BARANG HUTANG
+            #
+            # Diambil sekaligus untuk seluruh transaksi pelanggan agar
+            # tidak terjadi N+1 query. Data legacy dengan product_id
+            # NULL tetap terbaca lewat snapshot product_name.
+            # ==========================================================
+
+            detail_rows = conn.execute(
+                """
+                SELECT
+                    dd.transaction_id,
+                    dd.product_id,
+                    dd.product_name,
+                    dd.quantity,
+                    dd.price,
+                    dd.subtotal
+                FROM debt_details dd
+                JOIN debt_transactions dt
+                    ON dt.id = dd.transaction_id
+                WHERE dt.customer_id = ?
+                ORDER BY dd.transaction_id ASC, dd.id ASC;
+                """,
+                (customer_id,),
+            ).fetchall()
+
         # ==============================================================
         # GABUNGKAN MENJADI TIMELINE
         # ==============================================================
 
         timeline = []
+
+        items_by_transaction = {}
+
+        for row in detail_rows:
+            items_by_transaction.setdefault(
+                row["transaction_id"],
+                [],
+            ).append(
+                {
+                    "product_id": row["product_id"],
+                    "product_name": row["product_name"],
+                    "quantity": row["quantity"],
+                    "price": row["price"],
+                    "subtotal": row["subtotal"],
+                }
+            )
 
         for debt in debts:
             timeline.append(
@@ -494,6 +538,7 @@ class CustomerModel:
                     "type": "Hutang",
                     "amount": debt["total_amount"],
                     "notes": debt["notes"],
+                    "items": items_by_transaction.get(debt["id"], []),
                 }
             )
 
@@ -506,6 +551,7 @@ class CustomerModel:
                     "type": "Pembayaran",
                     "amount": payment["amount"],
                     "notes": payment["notes"],
+                    "items": [],
                 }
             )
 

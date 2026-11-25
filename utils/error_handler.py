@@ -27,9 +27,15 @@ from datetime import datetime
 
 
 def get_log_path() -> str:
-    """Lokasi file log, di folder data/ (folder yang sama dengan database)."""
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    data_dir = os.path.join(base_dir, "data")
+    """Lokasi file log, di folder data/ (folder yang sama dengan database).
+
+    Saat aplikasi sudah dibungkus PyInstaller, folder dasar harus folder
+    EXE (bukan folder ``_internal`` tempat modul ini berada), supaya
+    pengguna bisa menemukan ``data/error.log`` di sebelah EXE.
+    """
+    from database.database import get_app_base_dir
+
+    data_dir = os.path.join(get_app_base_dir(), "data")
     os.makedirs(data_dir, exist_ok=True)
     return os.path.join(data_dir, "error.log")
 

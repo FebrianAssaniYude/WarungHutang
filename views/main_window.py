@@ -360,6 +360,7 @@ class MainWindow(ctk.CTk):
                     user_model=self.user_model,
                     db_path_getter=get_database_path,
                     on_username_changed=self._handle_username_changed,
+                    on_restore_complete=self._handle_logout,
                 )
 
             page.grid(

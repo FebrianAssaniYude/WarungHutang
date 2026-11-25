@@ -861,6 +861,53 @@ try:
             False,
         )
 
+    # Customer history
+    history_detail = cm.get_detail(siti_id)
+    history_pdf = os.path.join(
+        PDF_DIR,
+        "riwayat_pelanggan.pdf",
+    )
+
+    history_payload = {
+        "customer_id": history_detail["id"],
+        "customer_name": history_detail["name"],
+        "total_debt": history_detail["total_debt"],
+        "total_paid": history_detail["total_paid"],
+        "sisa": history_detail["sisa"],
+        "timeline": history_detail["timeline"],
+    }
+
+    try:
+        printer.create_pdf(
+            "customer_history",
+            history_payload,
+            output_path=history_pdf,
+        )
+
+        check(
+            "PDF riwayat pelanggan berhasil dibuat",
+            os.path.exists(history_pdf)
+            and os.path.getsize(history_pdf) > 0,
+        )
+
+    except Exception:
+        check(
+            "PDF riwayat pelanggan berhasil dibuat",
+            False,
+        )
+
+    debt_items = [
+        item
+        for entry in history_detail.get("timeline", [])
+        if entry.get("type") == "Hutang"
+        for item in (entry.get("items") or [])
+    ]
+
+    check(
+        "Riwayat pelanggan memuat rincian barang",
+        len(debt_items) > 0,
+    )
+
     # ------------------------------------------------------------------
     # 15. INVALID STOCK / ATOMIC VALIDATION
     # ------------------------------------------------------------------

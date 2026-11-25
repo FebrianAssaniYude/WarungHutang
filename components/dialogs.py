@@ -252,8 +252,20 @@ _KIND_COLORS = {
 class MessageDialog(BaseDialog):
     """Dialog pesan satu tombol (pengganti messagebox): info, success, warning, error."""
 
-    def __init__(self, master, title: str, message: str, kind: str = "info"):
+    def __init__(
+        self,
+        master,
+        title: str,
+        message: str,
+        kind: str = "info",
+        on_close=None,
+    ):
         super().__init__(master, title, DIALOG_WIDTH["confirm"])
+
+        self._on_close = on_close
+
+        # Pastikan callback tetap dijalankan walau dialog ditutup lewat X.
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         self.heading_label.configure(
             text_color=_KIND_COLORS.get(kind, COLORS["text"])
@@ -272,13 +284,24 @@ class MessageDialog(BaseDialog):
         self.set_buttons("OK", self.destroy, secondary_text=None)
         self.finish()
 
+    def destroy(self):
+        callback = getattr(self, "_on_close", None)
+        self._on_close = None
+        super().destroy()
+
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                pass
+
 
 def show_info(master, title: str, message: str):
     MessageDialog(master, title, message, "info")
 
 
-def show_success(master, title: str, message: str):
-    MessageDialog(master, title, message, "success")
+def show_success(master, title: str, message: str, on_close=None):
+    MessageDialog(master, title, message, "success", on_close=on_close)
 
 
 def show_warning(master, title: str, message: str):

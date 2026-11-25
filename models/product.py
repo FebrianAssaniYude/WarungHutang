@@ -28,7 +28,6 @@ class ProductModel:
                 p.opening_stock,
                 p.supplier_id,
                 s.name AS supplier_name,
-                p.image_path,
                 p.unit,
                 p.is_active,
                 p.created_at,
@@ -80,7 +79,6 @@ class ProductModel:
                     p.opening_stock,
                     p.supplier_id,
                     s.name AS supplier_name,
-                    p.image_path,
                     p.unit,
                     p.is_active,
                     p.created_at,
@@ -117,7 +115,6 @@ class ProductModel:
                 p.opening_stock,
                 p.supplier_id,
                 s.name AS supplier_name,
-                p.image_path,
                 p.unit,
                 p.is_active,
                 p.created_at,
@@ -151,7 +148,6 @@ class ProductModel:
         opening_stock=0,
         barcode: str = "",
         supplier_id=None,
-        image_path: str = "",
     ):
         """
         Returns:
@@ -182,7 +178,6 @@ class ProductModel:
             return False, f"Stok awal: {error}", None
 
         barcode = (barcode or "").strip() or None
-        image_path = (image_path or "").strip() or None
 
         try:
             with self.db.transaction() as conn:
@@ -200,10 +195,9 @@ class ProductModel:
                         selling_price,
                         stock,
                         opening_stock,
-                        supplier_id,
-                        image_path
+                        supplier_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                     """,
                     (
                         barcode,
@@ -214,7 +208,6 @@ class ProductModel:
                         stock_value,
                         stock_value,
                         supplier_id,
-                        image_path,
                     ),
                 )
 
@@ -243,7 +236,6 @@ class ProductModel:
         selling_price,
         barcode: str = "",
         supplier_id=None,
-        image_path: str = "",
     ):
         """
         Mengedit data master produk.
@@ -264,7 +256,6 @@ class ProductModel:
             return False, f"Harga jual: {error}"
 
         barcode = (barcode or "").strip() or None
-        image_path = (image_path or "").strip() or None
 
         try:
             with self.db.transaction() as conn:
@@ -294,7 +285,6 @@ class ProductModel:
                         purchase_price = ?,
                         selling_price = ?,
                         supplier_id = ?,
-                        image_path = ?,
                         updated_at = datetime('now', 'localtime')
                     WHERE id = ?;
                     """,
@@ -305,7 +295,6 @@ class ProductModel:
                         purchase_value,
                         selling_value,
                         supplier_id,
-                        image_path,
                         product_id,
                     ),
                 )

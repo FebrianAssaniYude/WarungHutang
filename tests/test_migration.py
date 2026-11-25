@@ -391,7 +391,7 @@ def create_legacy_v1_database(db_path):
         conn.close()
 
 
-def test_v1_to_v2(temp_dir):
+def run_v1_to_v2(temp_dir):
     print()
     print("=" * 70)
     print("TEST 1 — MIGRATION v1 -> v2")
@@ -818,7 +818,7 @@ def test_v1_to_v2(temp_dir):
     return True
 
 
-def test_existing_v2_database():
+def run_existing_v2_database():
     print()
     print("=" * 70)
     print("TEST 2 — SALINAN DATABASE ASLI")
@@ -893,6 +893,23 @@ def test_existing_v2_database():
 
     return True
 
+# ----------------------------------------------------------------------
+# Pembungkus pytest
+#
+# Fungsi `run_*` di atas dipakai juga oleh `main()` (mode skrip) dan
+# mengembalikan bool. Pytest tidak boleh mengoleksi fungsi yang
+# mengembalikan nilai, jadi pembungkus tipis di bawah ini yang menjadi
+# test sebenarnya.
+# ----------------------------------------------------------------------
+
+def test_v1_to_v2(temp_dir):
+    assert run_v1_to_v2(temp_dir) is True
+
+
+def test_existing_v2_database():
+    assert run_existing_v2_database() is True
+
+
 def main():
     print("=" * 70)
     print("WARUNG HUTANG — MIGRATION TEST SUITE")
@@ -902,11 +919,11 @@ def main():
         prefix="warung_migration_test_"
     ) as temp_dir:
 
-        migration_result = test_v1_to_v2(
+        migration_result = run_v1_to_v2(
             temp_dir
         )
 
-    existing_result = test_existing_v2_database()
+    existing_result = run_existing_v2_database()
 
     print()
     print("=" * 70)

@@ -5,7 +5,29 @@ import os
 from database.database import Database, get_database_path
 from views.login import LoginWindow
 from views.main_window import MainWindow
+from utils.backup import recover_interrupted_restore
+from utils.instance_lock import AlreadyRunningError, SingleInstanceLock
 from utils.theme import apply_theme
+
+
+def _show_message(title: str, message: str, kind: str = "error") -> None:
+    """Menampilkan pesan sederhana sebelum jendela utama dibuat."""
+    import tkinter as tk
+    from tkinter import messagebox
+
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        if kind == "warning":
+            messagebox.showwarning(title, message)
+        elif kind == "info":
+            messagebox.showinfo(title, message)
+        else:
+            messagebox.showerror(title, message)
+    finally:
+        root.destroy()
+
 
 def initialize_database_or_exit() -> Database:
     """
@@ -16,29 +38,35 @@ def initialize_database_or_exit() -> Database:
     berjalan dengan database yang belum siap (data tidak boleh hilang/rusak).
     """
     db = Database()
+    recovery_message = ""
+
     try:
+        recovery = recover_interrupted_restore(db.db_path)
+        recovery_message = recovery.get("message") or ""
         db.initialize()
     except Exception as e:
         import sys
-        import tkinter as tk
-        from tkinter import messagebox
 
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror(
+        _show_message(
             "Gagal Memulai Aplikasi",
-            "Warung Hutang tidak bisa dijalankan karena database gagal disiapkan.\n\n"
+            "Warung Hutang tidak bisa dijalankan karena database gagal "
+            "disiapkan.\n\n"
             f"Lokasi database: {get_database_path()}\n\n"
             "Kemungkinan penyebab: folder tidak bisa ditulis, disk penuh, "
             "atau file database rusak.\n\n"
-            "Coba jalankan aplikasi sebagai administrator, pastikan ada "
-            "ruang kosong di disk, atau pulihkan dari file backup lewat "
-            "menu Pengaturan > Restore Database (jika database sebelumnya "
-            "masih ada).\n\n"
+            "Jika sebelumnya Anda menjalankan restore, jangan membuat "
+            "database baru. Periksa pesan di atas dan gunakan safety "
+            "backup yang disebutkan.\n\n"
             f"Detail teknis: {e}",
         )
-        root.destroy()
         sys.exit(1)
+
+    if recovery_message:
+        _show_message(
+            "Pemulihan Restore",
+            recovery_message,
+            kind="warning",
+        )
 
     return db
 
@@ -74,30 +102,50 @@ def run_main_window(user: dict, db: Database) -> bool:
 
 
 def main():
-    db = initialize_database_or_exit()
+    lock_path = os.path.join(
+        os.path.dirname(get_database_path()),
+        ".warung.lock",
+    )
+    instance_lock = SingleInstanceLock(lock_path)
 
-    print("=" * 50)
-    print("Warung Hutang - Inisialisasi Database")
-    print("=" * 50)
-    print(f"Lokasi database : {get_database_path()}")
-    print("Status          : Berhasil diinisialisasi.")
-    print("Akun default    : username='admin', password='admin'")
-    print("=" * 50)
+    try:
+        instance_lock.acquire()
+    except AlreadyRunningError as exc:
+        _show_message(
+            "Aplikasi Sudah Berjalan",
+            str(exc),
+            kind="warning",
+        )
+        return
 
-    while True:
-        user = run_login(db)
-        if user is None:
-            # Jendela login ditutup langsung tanpa login berhasil.
-            break
+    try:
+        db = initialize_database_or_exit()
 
-        print(f"[LOGIN OK] Selamat datang, {user['username']}!")
-        should_return_to_login = run_main_window(user, db)
+        print("=" * 50)
+        print("Warung Hutang - Inisialisasi Database")
+        print("=" * 50)
+        print(f"Lokasi database : {get_database_path()}")
+        print("Status          : Berhasil diinisialisasi.")
+        print("Akun default    : username='admin', password='admin'")
+        print("=" * 50)
 
-        if not should_return_to_login:
-            # Main window ditutup langsung (tombol X), bukan lewat Logout.
-            break
+        while True:
+            user = run_login(db)
+            if user is None:
+                # Jendela login ditutup langsung tanpa login berhasil.
+                break
 
-        print("[LOGOUT] Kembali ke halaman login.")
+            print(f"[LOGIN OK] Selamat datang, {user['username']}!")
+            should_return_to_login = run_main_window(user, db)
+
+            if not should_return_to_login:
+                # Main window ditutup langsung (tombol X), bukan lewat
+                # Logout.
+                break
+
+            print("[LOGOUT] Kembali ke halaman login.")
+    finally:
+        instance_lock.release()
 
 
 def _log_crash_to_file(exc: Exception):

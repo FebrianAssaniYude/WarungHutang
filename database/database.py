@@ -7,6 +7,11 @@ from datetime import datetime
 # utils/security.py ada satu level di atas folder database/
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.security import hash_password  # noqa: E402
+from database.integrity import (  # noqa: E402
+    content_digest,
+    inspect_database,
+    sqlite_backup,
+)
 
 
 DEFAULT_ADMIN_USERNAME = "admin"
@@ -115,7 +120,7 @@ class Database:
     # INITIALIZATION
     # =====================================================
 
-    def initialize(self) -> None:
+    def initialize(self, run_bootstrap: bool = True) -> None:
         """
         Inisialisasi database.
 
@@ -125,12 +130,17 @@ class Database:
            sampai versi terbaru.
         3. Database sudah terbaru -> validasi saja.
         4. Versi tidak dikenal -> hentikan aplikasi.
+
+        Args:
+            run_bootstrap: Jika False, jangan membuat admin default atau
+                folder gambar. Dipakai saat migrasi salinan staging
+                restore agar database produksi tidak tersentuh.
         """
 
         if not os.path.exists(self.db_path):
             self._create_fresh_database()
-            self._ensure_default_admin()
-            self._ensure_image_directory()
+            if run_bootstrap:
+                self._ensure_default_admin()
             return
 
         version = self._detect_schema_version()
@@ -166,8 +176,8 @@ class Database:
 
         self._validate_schema_v4()
 
-        self._ensure_default_admin()
-        self._ensure_image_directory()
+        if run_bootstrap:
+            self._ensure_default_admin()
 
     # =====================================================
     # SCHEMA DETECTION
@@ -793,14 +803,41 @@ class Database:
             f"pre_migration_from_v{from_version}_{timestamp}.db",
         )
 
-        source = sqlite3.connect(self.db_path)
-        destination = sqlite3.connect(backup_path)
+        counter = 1
+        while os.path.exists(backup_path):
+            backup_path = os.path.join(
+                backup_dir,
+                f"pre_migration_from_v{from_version}_"
+                f"{timestamp}_{counter}.db",
+            )
+            counter += 1
 
-        try:
-            source.backup(destination)
-        finally:
-            destination.close()
-            source.close()
+        sqlite_backup(self.db_path, backup_path)
+
+        # Backup migrasi adalah satu-satunya jaring pengaman sebelum
+        # schema diubah. Jangan pernah melanjutkan migrasi jika backup
+        # ini tidak terbukti valid dan identik dengan sumber.
+        inspection = inspect_database(backup_path)
+
+        if inspection.errors:
+            try:
+                os.remove(backup_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Backup sebelum migrasi gagal diverifikasi: "
+                + "; ".join(inspection.errors)
+            )
+
+        if content_digest(self.db_path) != content_digest(backup_path):
+            try:
+                os.remove(backup_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Backup sebelum migrasi tidak identik dengan database "
+                "sumber. Migrasi dibatalkan."
+            )
 
         return backup_path
 
@@ -1068,17 +1105,3 @@ class Database:
                         password_hash,
                     ),
                 )
-
-    # =====================================================
-    # IMAGE DIRECTORY
-    # =====================================================
-
-    def _ensure_image_directory(self) -> None:
-        """Memastikan folder gambar produk tersedia."""
-        image_dir = os.path.join(
-            get_app_base_dir(),
-            "data",
-            "images",
-        )
-
-        os.makedirs(image_dir, exist_ok=True)

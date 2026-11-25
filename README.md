@@ -18,12 +18,17 @@ Berjalan 100% lokal di satu PC — tanpa server, tanpa internet, tanpa cloud.
 
 ```
 pip install -r requirements.txt
+python -m pytest -q
 python tests/test_integration.py
 ```
-Skrip ini memakai database sementara di folder temp sistem (tidak
-menyentuh `data/warung.db` asli) dan menghapusnya lagi setelah selesai.
-Jalankan ini kapan pun setelah mengubah kode, untuk memastikan alur inti
-(hutang, pembayaran, saldo, backup/restore) masih benar.
+
+`pytest` menjalankan seluruh unit test (termasuk `tests/test_backup_restore.py`).
+`tests/test_integration.py` adalah skrip uji end-to-end manual yang sengaja
+tidak dikoleksi pytest karena seluruh alurnya berjalan saat diimpor.
+Keduanya memakai database sementara di folder temp sistem (tidak menyentuh
+`data/warung.db` asli) dan menghapusnya lagi setelah selesai. Jalankan
+setelah mengubah kode untuk memastikan alur inti (hutang, pembayaran,
+saldo, backup/restore) masih benar.
 
 ## Menjalankan (development)
 
@@ -50,6 +55,54 @@ disimpan sebagai teks biasa. Nanti bisa diganti lewat menu Pengaturan.)
 
 `data/warung.db` (relatif terhadap folder aplikasi). Saat sudah menjadi
 `.exe`, database tetap disimpan di folder `data/` di sebelah file `.exe`.
+
+## Backup & restore database
+
+Backup dan restore tersedia di **Pengaturan > Backup/Restore**. Keduanya
+dirancang agar data yang sudah ada tidak pernah hilang atau tertimpa
+sembarangan.
+
+### Backup
+
+- Memakai **SQLite Backup API**, bukan penyalinan file biasa, sehingga
+  hasilnya adalah snapshot database yang konsisten.
+- Backup baru dianggap berhasil setelah lolos pemeriksaan:
+  `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, kelengkapan
+  tabel/kolom sesuai versi schema, serta perbandingan isi dengan database
+  sumber.
+- File disimpan di `data/backup/backup_<tanggal>_<waktu>.db`.
+- Backup lama **tidak pernah dihapus otomatis**. Semua backup disimpan.
+- Backup hanya berisi database. **Gambar produk tidak termasuk** dalam
+  backup/restore. File gambar lama (jika ada) tidak dihapus.
+
+### Restore
+
+Restore memakai proses bertahap agar database produksi tidak tersentuh
+sampai backup benar-benar terbukti layak:
+
+1. File backup diperiksa lebih dulu (integritas, foreign key, schema,
+   minimal satu akun pengguna, dan nomor transaksi tidak ganda).
+   Backup yang rusak, tidak lengkap, atau berasal dari versi aplikasi
+   yang lebih baru akan **ditolak sebelum database produksi diubah**.
+2. Backup disalin ke folder kerja `data/.restore_work/`, lalu migrasi
+   schema lama (v1–v3) dijalankan **hanya pada salinan staging**.
+   File backup asli tidak pernah dimodifikasi.
+3. Safety backup database saat ini dibuat dan diverifikasi di
+   `data/backup/before_restore_<tanggal>_<waktu>.db`.
+4. Database produksi ditukar secara atomik, lalu diperiksa ulang
+   (schema, integritas, foreign key, dan kecocokan isi).
+5. Jika salah satu langkah gagal, database produksi dikembalikan ke
+   kondisi sebelumnya. Safety backup tetap disimpan.
+6. Jika aplikasi terhenti di tengah restore, saat startup berikutnya
+   aplikasi memulihkan database dari salinan sebelumnya/safety backup
+   secara otomatis sebelum database dipakai.
+7. Setelah restore berhasil, pengguna otomatis diarahkan ke halaman
+   login agar seluruh data dimuat ulang.
+
+Hanya satu instance aplikasi yang boleh berjalan pada satu waktu
+(`data/.warung.lock`). Jika aplikasi lain sudah terbuka, instance kedua
+akan menampilkan pesan dan berhenti, sehingga backup/restore tidak
+berjalan bersamaan dengan penulisan data lain.
 
 ## Cara membuat file .exe (Windows)
 
@@ -130,6 +183,7 @@ warung-hutang/
   README.md
   database/
     database.py            # koneksi, inisialisasi, transaksi aman
+    integrity.py           # pemeriksaan read-only: integritas, schema, isi
     schema.sql              # definisi seluruh tabel
   models/
     user.py                 # autentikasi, ganti username/password
@@ -154,10 +208,12 @@ warung-hutang/
     security.py             # hashing & verifikasi password (bcrypt)
     formatter.py             # format Rupiah & tanggal Indonesia
     barcode.py                # widget input barcode scanner (HID)
-    backup.py                  # backup & restore database (dengan safety-backup)
+    backup.py                  # backup terverifikasi & restore bertahap
+    instance_lock.py            # kunci satu instance aplikasi
     error_handler.py            # jaring pengaman global untuk error tak terduga di GUI
   data/
     warung.db               # dibuat otomatis saat pertama dijalankan
   tests/
+    test_backup_restore.py   # uji keamanan backup/restore
     test_integration.py      # uji end-to-end seluruh alur (Phase 12)
 ```

@@ -3,6 +3,9 @@ __pycache__/
 data/warung.db
 data/backup/
 data/error.log
+data/.warung.lock
+data/.restore_state.json
+data/.restore_work/
 build/
 dist/
 # Catatan: build.spec SENGAJA tidak di-ignore - ini konfigurasi PyInstaller

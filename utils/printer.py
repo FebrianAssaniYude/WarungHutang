@@ -658,6 +658,86 @@ class Printer:
         table.setStyle(self._grid_style())
 
         elements.append(table)
+        elements.extend(
+            self._build_customer_history_items(timeline, styles)
+        )
+
+        return elements
+
+    def _build_customer_history_items(
+        self,
+        timeline: List[Dict[str, Any]],
+        styles: Dict[str, ParagraphStyle],
+    ) -> List[Any]:
+        """
+        Rincian barang untuk setiap transaksi hutang pada riwayat
+        pelanggan.
+
+        Tabel timeline tetap menjadi ringkasan. Bagian ini memberi
+        konteks barang (nama, qty, harga, subtotal) tanpa mengubah
+        bentuk tabel utama. Transaksi lama tanpa rincian tetap
+        ditampilkan dengan keterangan agar pengguna tahu datanya memang
+        tidak tersimpan.
+        """
+        debt_entries = [
+            entry
+            for entry in timeline
+            if (entry.get("type") or "") == "Hutang"
+        ]
+
+        if not debt_entries:
+            return []
+
+        elements: List[Any] = [
+            Spacer(1, SECTION_GAP),
+            Paragraph(
+                "Rincian Barang per Transaksi",
+                styles["section_title"],
+            ),
+            Spacer(1, 2 * mm),
+        ]
+
+        for entry in debt_entries:
+            items = entry.get("items") or []
+
+            reference = (
+                entry.get("transaction_number") or "Transaksi Lama"
+            )
+            date_text = format_date_indonesia(entry.get("date"))
+
+            elements.append(
+                Paragraph(
+                    f"<b>{self._escape_text(reference)}</b> - "
+                    f"{self._escape_text(date_text)}",
+                    styles["normal"],
+                )
+            )
+            elements.append(Spacer(1, 1 * mm))
+
+            if items:
+                elements.append(
+                    self._build_items_table("Harga", items, styles)
+                )
+                elements.append(Spacer(1, 1 * mm))
+                elements.append(
+                    Paragraph(
+                        "Total transaksi: "
+                        + self._escape_text(
+                            self._money(entry.get("amount"))
+                        ),
+                        styles["table_cell_right"],
+                    )
+                )
+            else:
+                elements.append(
+                    Paragraph(
+                        "Tidak ada rincian barang tersimpan untuk "
+                        "transaksi ini.",
+                        styles["muted"],
+                    )
+                )
+
+            elements.append(Spacer(1, SMALL_GAP))
 
         return elements
 
