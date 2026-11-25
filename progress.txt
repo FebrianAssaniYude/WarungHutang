@@ -1,7 +1,7 @@
 PROJECT: Warung Hutang
-LAST UPDATED: 2026-11-26 05:09:25 +07:00
-CURRENT PHASE: Phase 2 - Riwayat Pelanggan & Detail Barang pada PDF (Committed)
-OVERALL STATUS: Phase 1 + Phase 2 committed (a58de53); next is EXE/UI smoke test
+LAST UPDATED: 2026-11-26 05:36:07 +07:00
+CURRENT PHASE: Phase 2B - Rincian Barang pada Laporan + Riwayat Pembelian (Committed)
+OVERALL STATUS: Phase 2B committed (d4de614); 180 pytest + 80 integration passed
 
 ==============================================================================
 A. PROJECT OVERVIEW
@@ -56,7 +56,7 @@ Sistem backup/restore:
 - Hanya satu instance aplikasi yang diizinkan (`data/.warung.lock`).
 
 Sistem pengujian dan packaging EXE:
-- `python -m pytest -q`: 175 test otomatis (per 2026-11-26), tanpa
+- `python -m pytest -q`: 180 test otomatis (per 2026-11-26), tanpa
   warning.
 - `python tests/test_integration.py`: skrip end-to-end manual; sengaja
   tidak dikoleksi pytest karena seluruh alur berjalan saat diimpor.
@@ -82,6 +82,16 @@ Phase 2: Integritas transaksi dan siklus hutang pelanggan.
 - Status: IMPLEMENTED - VERIFIED - COMMITTED (a58de53).
 - PDF "Cetak Riwayat" pada detail pelanggan sekarang menampilkan
   rincian barang (nama, qty, harga, subtotal) per transaksi hutang.
+- Implementasi tanpa perubahan schema, lokasi database, atau nama EXE.
+
+Phase 2B: Rincian barang pada Laporan Bulanan + Riwayat Pembelian.
+- Status: IMPLEMENTED - VERIFIED - COMMITTED (d4de614).
+- Permintaan pengguna (2026-11-26): "Cetak Laporan" pada menu Laporan
+  juga menampilkan detail barang seperti PDF riwayat pelanggan, dan
+  menu Laporan ditambah riwayat pembelian.
+- Desain disetujui pengguna: tab/segmen Hutang & Pembayaran vs
+  Pembelian; cetak laporan lengkap; mesin cetak `Printer`
+  (`monthly_report`).
 - Implementasi tanpa perubahan schema, lokasi database, atau nama EXE.
 
 Phase 3: Konsistensi UI/UX.
@@ -344,6 +354,88 @@ WH-017 | Perubahan Phase 1 + Phase 2 belum di-commit
 - Kriteria keberhasilan: Commit berisi perubahan Phase 1, Phase 2, dan
   test terkait. Terpenuhi.
 
+WH-018 | Cetak Laporan Bulanan belum menampilkan detail barang
+- Prioritas: P1
+- Modul: models/report.py, views/reports.py, utils/printer.py
+- Bukti:
+  - `LaporanPage._handle_print()` memakai
+    `ReportModel.export_to_pdf()`, yaitu PDF berbasis `canvas` reportlab
+    yang hanya menggambar ringkasan + timeline (Tanggal, Pelanggan,
+    Jenis, Nominal).
+  - `ReportModel.get_monthly_report()` tidak mengambil `debt_details`,
+    sehingga tidak ada data barang untuk dicetak.
+  - `Printer._build_monthly_report_document()` sudah ada dan lebih
+    rapi (flowable, header berjalan, zebra), tetapi tidak dipakai UI
+    dan belum punya test.
+- Rekomendasi:
+  1. Lampirkan `items` pada setiap entry Hutang di `details` (satu
+     query JOIN `debt_details`, kelompokkan per transaksi).
+  2. Tambahkan bagian "Rincian Barang Hutang per Transaksi" pada PDF
+     laporan bulanan, memakai pola yang sama dengan riwayat pelanggan.
+  3. Satukan mesin cetak: `export_to_pdf()` mendelegasikan ke
+     `Printer.create_pdf("monthly_report", report)` agar tampilan
+     konsisten dengan PDF riwayat pelanggan.
+- Status: DONE - implemented di `models/report.py`, `utils/printer.py`,
+  `views/reports.py`; test lulus.
+- Implementasi: `get_monthly_report()` melampirkan `items` pada entry
+  Hutang; PDF memuat "Rincian Barang Hutang per Transaksi";
+  `export_to_pdf()` menjadi delegasi tipis ke `Printer`.
+- Dependensi/risiko: Format PDF laporan berubah; data legacy tanpa
+  `debt_details` harus tetap tercetak dengan keterangan.
+- Kriteria keberhasilan: PDF laporan menampilkan nama barang, qty,
+  harga, subtotal per transaksi hutang; test lulus; DB tidak berubah.
+
+WH-019 | Menu Laporan belum memiliki riwayat pembelian
+- Prioritas: P1
+- Modul: models/report.py, views/reports.py
+- Bukti:
+  - `get_monthly_report()` hanya mengembalikan hutang + pembayaran.
+  - Halaman Laporan hanya punya satu tabel "Detail Transaksi" berisi
+    Hutang dan Pembayaran.
+  - Riwayat pembelian saat ini hanya ada di halaman "Riwayat" dengan
+    filter Jenis = Pembelian; tidak ada di menu Laporan.
+- Rekomendasi:
+  1. Tambahkan agregasi pembelian per bulan ke `get_monthly_report()`:
+     total, jumlah transaksi, daftar pembelian + `items`.
+  2. Tampilkan riwayat pembelian di halaman Laporan (tab/segmen atau
+     bagian terpisah).
+  3. Sertakan ringkasan + rincian barang pembelian di PDF laporan.
+- Status: DONE - implemented; tab "Pembelian", tabel pembelian, dan
+  dialog detail; PDF memuat riwayat + rincian barang pembelian.
+- Dependensi/risiko: `purchases.supplier_id` boleh NULL (data saat ini
+  0 supplier); tampilkan "Tidak ada supplier".
+- Kriteria keberhasilan: Pengguna dapat melihat dan mencetak riwayat
+  pembelian per bulan dari menu Laporan.
+
+WH-020 | `Printer._build_monthly_report_document` tidak terpakai & tanpa test
+- Prioritas: P2
+- Modul: utils/printer.py, tests/
+- Bukti: Builder `monthly_report` terdaftar di `SUPPORTED_DOCUMENTS`
+  dan `_build_document`, tetapi tidak ada pemanggil di UI/test.
+- Rekomendasi: Jadikan satu-satunya mesin cetak laporan bulanan, lalu
+  tambah test isi flowable (ringkasan, timeline, rincian barang,
+  pembelian).
+- Status: DONE - `monthly_report` menjadi satu-satunya mesin cetak
+  laporan bulanan; `export_to_pdf` menjadi delegasi tipis.
+- Dependensi/risiko: `export_to_pdf` lama menjadi delegasi tipis.
+- Kriteria keberhasilan: Tidak ada dua implementasi PDF laporan yang
+  berbeda; regresi isi terdeteksi test.
+
+WH-021 | Belum ada test laporan bulanan (isi, item, pembelian)
+- Prioritas: P2
+- Modul: tests/
+- Bukti: `tests/test_integration.py` hanya memanggil
+  `get_monthly_report()` dan `export_to_pdf()` lalu memeriksa file ada
+  dan ukuran > 0. Tidak ada test isi PDF atau agregasi pembelian.
+- Rekomendasi: Tambah `tests/test_monthly_report_pdf.py` untuk data
+  items hutang, pembelian + items, legacy tanpa items, isi flowable,
+  dan pembuatan PDF.
+- Status: DONE - `tests/test_monthly_report_pdf.py` (5 test) +
+  pemeriksaan baru di `tests/test_integration.py`.
+- Dependensi/risiko: Tidak menambah dependency PDF parser.
+- Kriteria keberhasilan: Regresi (barang/pembelian hilang dari PDF)
+  gagal di test.
+
 ==============================================================================
 D. COMPLETED WORK
 ==============================================================================
@@ -417,43 +509,111 @@ D. COMPLETED WORK
   dibuat 3 halaman (verifikasi page break struktural), disimpan di
   folder temp, bukan di project.
 
+2026-11-26 - Audit Phase 2B (laporan bulanan + riwayat pembelian)
+- Audit `views/reports.py`, `models/report.py`,
+  `utils/printer.py::_build_monthly_report_document`,
+  `models/purchase.py`, `models/history.py`, dan `views/history.py`.
+- Temuan: cetak laporan memakai engine canvas terpisah dan tidak
+  membawa `debt_details`; menu Laporan tidak memiliki pembelian;
+  builder `monthly_report` di Printer tidak dipakai; belum ada test isi
+  laporan.
+- Data pembelian sudah lengkap di `purchases` + `purchase_details`
+  (snapshot nama barang, qty, harga, subtotal); `supplier_id` boleh
+  NULL.
+- Tidak ada perubahan kode aplikasi pada sesi audit ini.
+
+2026-11-26 - Implementasi Phase 2B (laporan bulanan + riwayat pembelian)
+- `models/report.py`:
+  - `get_monthly_report()` menambah `total_purchase_month`,
+    `count_purchase_month`, `total_purchase_items_month`, `purchases`
+    (header + `items`), dan `items` pada setiap entry Hutang.
+  - Satu query JOIN per sumber (`debt_details`, `purchase_details`)
+    lalu dikelompokkan per transaksi (tanpa N+1).
+  - `export_to_pdf()` sekarang mendelegasikan ke
+    `Printer.create_pdf("monthly_report", ...)`; kode canvas lama
+    dihapus. `store_name` tetap diselesaikan dari
+    `SettingsModel(self.db)`.
+- `utils/printer.py`:
+  - `_build_item_details_sections()` baru sebagai blok rincian barang
+    reusable; `_build_customer_history_items()` memakainya.
+  - Laporan bulanan: ringkasan (hutang/pembayaran, pembelian, saldo),
+    tabel detail, "Rincian Barang Hutang per Transaksi", "Riwayat
+    Pembelian Bulan Ini" + tabel, dan "Rincian Barang Pembelian per
+    Transaksi".
+  - `PURCHASE_REPORT_COLUMNS` baru; `supplier_id` NULL dicetak
+    "Tidak ada supplier".
+- `views/reports.py`:
+  - `CTkSegmentedButton` "Hutang & Pembayaran" / "Pembelian".
+  - Empat kartu ringkasan berganti judul/nilai sesuai mode.
+  - Tabel pembelian terpisah + klik dua kali membuka
+    `PurchaseDetailDialog`; footer mengikuti tabel aktif.
+- `components/cards.py`: `StatCard.title_label` + `set_title()`.
+- `tests/test_monthly_report_pdf.py` (baru, 5 test): agregasi items +
+  pembelian, legacy tanpa items, isi flowable PDF, PDF tanpa
+  pembelian, dan delegasi `export_to_pdf`.
+- `tests/test_integration.py`: 4 pemeriksaan baru untuk items hutang,
+  riwayat pembelian, items pembelian, dan total pembelian.
+- Bukti: `pytest -q` 180 passed; integration 80 PASS / 0 FAIL; UI
+  smoke `detail=1 purchases=1`; PDF sintetis 4 halaman memuat semua
+  bagian baru.
+- Commit: `d4de614` (6 file, +893/-173); database, backup, dan file
+  runtime tidak disertakan.
+- Catatan DB: `data/warung.db` berubah pada 2026-11-26 05:13:38 /
+  05:14:00 karena entri uji manual lewat aplikasi (PB-20261126-0001,
+  HT-20261126-0001 dengan item "tes", "Rokok 2", "aqua 1"), bukan
+  oleh test/kode sesi ini. Tidak ada backup baru pada waktu itu.
+  Hash menjadi C166F440...; tidak berubah lagi selama investigasi
+  read-only.
+
 ==============================================================================
 E. TEST RESULTS
 ==============================================================================
 
-Perintah dan hasil aktual (2026-11-26):
+Perintah dan hasil aktual (2026-11-26, Phase 2B):
 1. `python -m pytest -q`
    - Hasil: PASS
-   - 175 passed, 0 warning, 232.61s.
+   - 180 passed, 0 warning, 218.49s.
 2. `python tests/test_integration.py`
    - Hasil: PASS
-   - 76 PASS / 0 FAIL.
+   - 80 PASS / 0 FAIL.
    - Mencakup login, settings, customer, supplier, product, pembelian,
      penjualan, hutang, pembayaran, timeline, history, dashboard,
-     laporan bulanan, PDF sale/purchase/debt/payment/customer_history,
-     atomic validation, backup, restore, integritas akhir.
-3. `python -m pytest -q tests/test_migration.py tests/test_customer_history_pdf.py`
+     laporan bulanan (+ items hutang, pembelian, items pembelian),
+     PDF sale/purchase/debt/payment/customer_history, atomic
+     validation, backup, restore, integritas akhir.
+3. `python -m pytest -q tests/test_monthly_report_pdf.py`
    - Hasil: PASS
-   - 8 passed, 0 warning.
-4. PDF sintetis `customer_history`
+   - 5 passed.
+4. `python -m pytest -q tests/test_migration.py tests/test_customer_history_pdf.py`
    - Hasil: PASS
-   - 12 transaksi hutang + 6 pembayaran + 1 legacy; 3 halaman;
-     ukuran 7.960 byte; file di folder temp.
-5. `python -m compileall -q ...`
-   - Hasil: PASS (sesi sebelumnya).
-6. Uji `SingleInstanceLock` dengan subprocess
-   - Hasil: PASS (sesi sebelumnya).
-7. `Get-FileHash data/warung.db` sebelum dan sesudah test
-   - Hasil: tidak berubah
-   - Hash: 0F4BE7AF5C8F93E7CEEED31DD99C8C6931C96A0BBFDDC644DF62E9E8B814D237
-   - Ukuran 208.896 byte; mtime 2026-10-27 16:28:41.
+   - 8 passed, 0 warning (sesi sebelumnya).
+5. UI smoke `LaporanPage` dengan DB temp
+   - Hasil: PASS
+   - `UI SMOKE OK: detail=1 purchases=1`; tab Pembelian dan tabel
+     pembelian dapat dirender.
+6. PDF sintetis laporan bulanan
+   - Hasil: PASS
+   - 8 hutang + 3 pembayaran + 6 pembelian; 4 halaman; memuat
+     "LAPORAN BULANAN", "Rincian Barang Hutang per Transaksi",
+     "Riwayat Pembelian Bulan Ini", dan "Rincian Barang Pembelian per
+     Transaksi"; file di folder temp.
+7. `python -m compileall -q ...`
+   - Hasil: PASS.
+8. `Get-FileHash data/warung.db` sebelum dan sesudah test
+   - Hasil: TIDAK berubah karena test (semua test memakai DB temp).
+   - Hash saat ini:
+     C166F440000F6FF42F15238A94F8859F145AF130CAB0B5DA718EF7C8D45FA29A
+   - Ukuran 208.896 byte; mtime 2026-11-26 05:14:00.
+   - Perubahan dari 0F4BE7AF... disebabkan entri uji manual lewat
+     aplikasi pada 05:13:38/05:14:00 (lihat D. Completed Work).
 
 Pengujian yang belum dilakukan:
 - Smoke test EXE hasil PyInstaller (startup, login, backup/restore,
   cetak PDF, error.log di sebelah EXE).
 - Uji klik UI nyata untuk restore -> dialog sukses -> logout.
-- Verifikasi visual PDF riwayat pelanggan dengan data produksi nyata
-  (layout, page break, header halaman kedua) di aplikasi GUI.
+- Verifikasi visual PDF riwayat pelanggan dan laporan bulanan dengan
+  data produksi nyata (layout, page break, header halaman kedua) di
+  aplikasi GUI.
 - Uji database produksi sebagai target restore (sengaja tidak
   dilakukan; hanya salinan/temp).
 
@@ -463,7 +623,7 @@ Risiko regresi yang masih terbuka:
   nyata.
 - Data legacy tanpa `debt_details` tetap dapat dicetak (diuji).
 - Perubahan UI/dialog restore belum diuji dengan klik nyata.
-- Perubahan Phase 1 + Phase 2 masih belum di-commit.
+- Perubahan Phase 2B masih belum di-commit.
 
 ==============================================================================
 F. PENDING WORK
@@ -471,8 +631,9 @@ F. PENDING WORK
 
 1. Smoke test UI restore/logout (WH-016).
 2. Smoke test EXE dan regresi Phase 4.
-3. Verifikasi visual PDF riwayat pelanggan memakai data nyata di GUI
-   (opsional; data sintetis sudah lolos uji struktural).
+3. Verifikasi visual PDF riwayat pelanggan + laporan bulanan memakai
+   data nyata di GUI (opsional; data sintetis sudah lolos uji
+   struktural).
 4. Normalisasi schema drift (WH-014) ditunda sampai ada keputusan
    migrasi khusus.
 
@@ -502,9 +663,17 @@ Keputusan yang sudah disetujui:
 - Database produksi (WH-008): pertahankan kondisi hasil restore
   2026-10-27; safety backup tetap disimpan untuk pemulihan di masa
   depan.
+- Desain Phase 2B (2026-11-26): tab/segmen "Hutang & Pembayaran" /
+  "Pembelian"; tombol "Cetak Laporan" mencetak laporan lengkap
+  (ringkasan + timeline + rincian barang hutang + tabel pembelian +
+  rincian barang pembelian); mesin cetak disatukan ke
+  `Printer.create_pdf("monthly_report", ...)`.
+- Entri uji manual pada database produksi 2026-11-26 05:13:38/05:14:00
+  (PB-20261126-0001, HT-20261126-0001) dibiarkan apa adanya; tidak
+  dihapus tanpa keputusan pengguna.
 
 Keputusan yang masih menunggu persetujuan:
-- Kapan dan bagaimana perubahan Phase 1 + Phase 2 di-commit.
+- Tidak ada. Phase 2B sudah disetujui dan di-commit (`d4de614`).
 
 Batasan yang harus dipertahankan:
 - Jangan menyentuh database produksi saat pengembangan/pengujian.
@@ -524,12 +693,12 @@ H. NEXT ACTION
 
 Satu langkah berikutnya:
 - Smoke test UI restore -> dialog sukses -> logout (WH-016) memakai
-  salinan backup, bukan database produksi.
+  salinan database, bukan database produksi.
 
 Alasan:
-- Phase 1 + Phase 2 sudah ter-commit (a58de53) dan lolos test otomatis.
-- Satu-satunya alur kritis yang belum diuji dengan klik nyata adalah
-  logout otomatis setelah restore.
+- Phase 2B sudah ter-commit (`d4de614`) dan lolos test otomatis.
+- Alur restore/logout adalah alur kritis yang belum diuji dengan klik
+  nyata.
 
 Syarat sebelum melanjutkan:
 - Gunakan salinan/temp database sebagai target restore.
